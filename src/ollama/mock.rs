@@ -11,7 +11,7 @@ use crate::ollama::types::*;
 /// Records which method was called and key parameters, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MockCall {
-    Chat { model: String, message_count: usize },
+    Chat { model: String, message_count: usize, has_system: bool },
     ChatStream { model: String, message_count: usize },
     Generate { model: String, prompt_len: usize },
     GenerateStream { model: String, prompt_len: usize },
@@ -26,6 +26,7 @@ pub struct MockOllamaClient {
     pub generate_response_text: String,
     pub model_list: Vec<String>,
     pub embedding: Vec<f32>,
+    fail_remaining: Arc<Mutex<u32>>,
 }
 
 impl MockOllamaClient {
@@ -37,6 +38,7 @@ impl MockOllamaClient {
             generate_response_text: "Mock generate response".to_string(),
             model_list: vec!["llama3:latest".to_string()],
             embedding: vec![0.1, 0.2, 0.3],
+            fail_remaining: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -47,6 +49,12 @@ impl MockOllamaClient {
 
     pub fn with_generate_response(mut self, text: impl Into<String>) -> Self {
         self.generate_response_text = text.into();
+        self
+    }
+
+    /// Make the first `n` calls to `chat()` return a `Pipeline` error.
+    pub fn with_fail_first_n(mut self, n: u32) -> Self {
+        self.fail_remaining = Arc::new(Mutex::new(n));
         self
     }
 
@@ -81,10 +89,19 @@ impl MockOllamaClient {
 #[async_trait]
 impl OllamaClient for MockOllamaClient {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, TermiError> {
+        let has_system = req.messages.iter().any(|m| m.role == "system");
         self.calls.lock().await.push(MockCall::Chat {
             model: req.model.clone(),
             message_count: req.messages.len(),
+            has_system,
         });
+
+        let mut remaining = self.fail_remaining.lock().await;
+        if *remaining > 0 {
+            *remaining -= 1;
+            return Err(TermiError::Pipeline("mock failure".to_string()));
+        }
+
         Ok(self.make_chat_response(&req.model))
     }
 
@@ -196,8 +213,37 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(matches!(
             &calls[0],
-            MockCall::Chat { model, message_count: 1 } if model == "llama3"
+            MockCall::Chat { model, message_count: 1, .. } if model == "llama3"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_mock_chat_records_has_system() {
+        let mock = MockOllamaClient::new("llama3");
+        let req = ChatRequest {
+            model: "llama3".into(),
+            messages: vec![Message::system("be helpful"), Message::user("hi")],
+            ..Default::default()
+        };
+        mock.chat(req).await.unwrap();
+        let calls = mock.recorded_calls().await;
+        assert!(matches!(&calls[0], MockCall::Chat { has_system: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn test_mock_fail_first_n_then_succeed() {
+        let mock = MockOllamaClient::new("llama3")
+            .with_chat_response("ok")
+            .with_fail_first_n(2);
+        let req = ChatRequest {
+            model: "llama3".into(),
+            messages: vec![Message::user("hi")],
+            ..Default::default()
+        };
+        assert!(mock.chat(req.clone()).await.is_err());
+        assert!(mock.chat(req.clone()).await.is_err());
+        assert!(mock.chat(req).await.is_ok());
+        assert_eq!(mock.recorded_calls().await.len(), 3);
     }
 
     #[tokio::test]
