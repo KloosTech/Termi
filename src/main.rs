@@ -3,6 +3,7 @@ mod error;
 mod explore;
 mod ollama;
 mod workflow;
+mod workflows;
 
 use std::sync::Arc;
 

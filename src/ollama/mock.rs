@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,6 +27,9 @@ pub struct MockOllamaClient {
     pub generate_response_text: String,
     pub model_list: Vec<String>,
     pub embedding: Vec<f32>,
+    /// Per-call response queue. When non-empty, `chat()` pops from the front;
+    /// falls back to `chat_response_text` when the queue is exhausted.
+    response_queue: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl MockOllamaClient {
@@ -37,6 +41,7 @@ impl MockOllamaClient {
             generate_response_text: "Mock generate response".to_string(),
             model_list: vec!["llama3:latest".to_string()],
             embedding: vec![0.1, 0.2, 0.3],
+            response_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -50,15 +55,31 @@ impl MockOllamaClient {
         self
     }
 
+    /// Pre-load an ordered list of chat responses. Each `chat()` call pops one
+    /// from the front; once exhausted, `chat_response_text` is used instead.
+    pub fn with_responses(
+        mut self,
+        responses: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let queue: VecDeque<String> = responses.into_iter().map(|s| s.into()).collect();
+        self.response_queue = Arc::new(Mutex::new(queue));
+        self
+    }
+
     pub async fn recorded_calls(&self) -> Vec<MockCall> {
         self.calls.lock().await.clone()
     }
 
-    fn make_chat_response(&self, model: &str) -> ChatResponse {
+    async fn next_chat_text(&self) -> String {
+        let mut q = self.response_queue.lock().await;
+        q.pop_front().unwrap_or_else(|| self.chat_response_text.clone())
+    }
+
+    fn make_chat_response(&self, model: &str, text: String) -> ChatResponse {
         ChatResponse {
             model: model.to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            message: Message::assistant(self.chat_response_text.clone()),
+            message: Message::assistant(text),
             done: true,
             done_reason: Some("stop".to_string()),
             total_duration: Some(100_000_000),
@@ -85,7 +106,8 @@ impl OllamaClient for MockOllamaClient {
             model: req.model.clone(),
             message_count: req.messages.len(),
         });
-        Ok(self.make_chat_response(&req.model))
+        let text = self.next_chat_text().await;
+        Ok(self.make_chat_response(&req.model, text))
     }
 
     async fn chat_stream(
@@ -97,12 +119,12 @@ impl OllamaClient for MockOllamaClient {
             message_count: req.messages.len(),
         });
         let model = req.model.clone();
-        let words: Vec<ChatStreamChunk> = self
-            .chat_response_text
+        let text = self.next_chat_text().await;
+        let words: Vec<ChatStreamChunk> = text
             .split_whitespace()
             .enumerate()
             .map(|(i, word)| {
-                let is_last = i == self.chat_response_text.split_whitespace().count() - 1;
+                let is_last = i == text.split_whitespace().count() - 1;
                 ChatStreamChunk {
                     model: model.clone(),
                     created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -177,6 +199,60 @@ impl OllamaClient for MockOllamaClient {
     }
 }
 
+// ── SlowMockOllamaClient ──────────────────────────────────────────────────────
+
+/// A mock that sleeps for `delay_ms` before returning, used to test timeouts.
+pub struct SlowMockOllamaClient {
+    delay_ms: u64,
+}
+
+impl SlowMockOllamaClient {
+    pub fn new(delay_ms: u64) -> Self {
+        Self { delay_ms }
+    }
+}
+
+#[async_trait]
+impl OllamaClient for SlowMockOllamaClient {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, TermiError> {
+        tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        Ok(ChatResponse {
+            model: req.model.clone(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            message: Message::assistant("slow response".to_string()),
+            done: true,
+            done_reason: Some("stop".to_string()),
+            total_duration: None,
+            eval_count: None,
+        })
+    }
+
+    async fn chat_stream(&self, _req: ChatRequest) -> Result<BoxStream<ChatStreamChunk>, TermiError> {
+        unimplemented!("SlowMockOllamaClient::chat_stream")
+    }
+
+    async fn generate(&self, _req: GenerateRequest) -> Result<GenerateResponse, TermiError> {
+        unimplemented!("SlowMockOllamaClient::generate")
+    }
+
+    async fn generate_stream(
+        &self,
+        _req: GenerateRequest,
+    ) -> Result<BoxStream<GenerateStreamChunk>, TermiError> {
+        unimplemented!("SlowMockOllamaClient::generate_stream")
+    }
+
+    async fn list_models(&self) -> Result<TagsResponse, TermiError> {
+        unimplemented!("SlowMockOllamaClient::list_models")
+    }
+
+    async fn embeddings(&self, _req: EmbeddingsRequest) -> Result<EmbeddingsResponse, TermiError> {
+        unimplemented!("SlowMockOllamaClient::embeddings")
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +274,27 @@ mod tests {
             &calls[0],
             MockCall::Chat { model, message_count: 1 } if model == "llama3"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_mock_with_responses_queue() {
+        let mock = MockOllamaClient::new("llama3").with_responses(["first", "second", "third"]);
+        let make_req = || ChatRequest {
+            model: "llama3".into(),
+            messages: vec![Message::user("hi")],
+            ..Default::default()
+        };
+
+        let r1 = mock.chat(make_req()).await.unwrap();
+        let r2 = mock.chat(make_req()).await.unwrap();
+        let r3 = mock.chat(make_req()).await.unwrap();
+        // Queue exhausted — falls back to default
+        let r4 = mock.chat(make_req()).await.unwrap();
+
+        assert_eq!(r1.message.content, "first");
+        assert_eq!(r2.message.content, "second");
+        assert_eq!(r3.message.content, "third");
+        assert_eq!(r4.message.content, "Mock chat response");
     }
 
     #[tokio::test]

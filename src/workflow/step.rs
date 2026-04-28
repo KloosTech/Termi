@@ -1,7 +1,16 @@
 use serde_json::Value;
 
+use crate::error::TermiError;
 use crate::workflow::context::WorkflowContext;
 use crate::workflow::output::OutputFormat;
+
+/// What a step's error handler returns to the runner.
+pub enum StepErrorAction {
+    /// Propagate the error and abort the workflow.
+    Abort,
+    /// Store this value in the context key and continue.
+    UseDefault(Value),
+}
 
 /// A single step in a workflow.
 pub struct Step {
@@ -15,17 +24,23 @@ pub struct Step {
     pub output_format: OutputFormat,
     /// Context key under which the parsed output is stored.
     pub output_key: &'static str,
+    /// Optional per-step error recovery.
+    pub error_handler: Option<Box<dyn Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync>>,
+    /// If set, the LLM call is cancelled after this many milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 // ── Fluent builder ─────────────────────────────────────────────────────────────
 
-/// Builder for a `Step`. Obtain one via `Step::build("name")`.
+/// Builder for a `Step`. Obtain one via `StepBuilder::new("name")`.
 pub struct StepBuilder {
     name: &'static str,
     model: Option<String>,
     prompt_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
     output_format: OutputFormat,
     output_key: Option<&'static str>,
+    error_handler: Option<Box<dyn Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync>>,
+    timeout_ms: Option<u64>,
 }
 
 impl StepBuilder {
@@ -36,6 +51,8 @@ impl StepBuilder {
             prompt_fn: None,
             output_format: OutputFormat::Text,
             output_key: None,
+            error_handler: None,
+            timeout_ms: None,
         }
     }
 
@@ -79,6 +96,25 @@ impl StepBuilder {
         self
     }
 
+    /// Attach a per-step error handler. Called when the LLM call or output
+    /// validation fails. Return `StepErrorAction::UseDefault(v)` to store a
+    /// fallback value and continue, or `StepErrorAction::Abort` (the default
+    /// when no handler is set) to propagate the error.
+    pub fn on_error<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync + 'static,
+    {
+        self.error_handler = Some(Box::new(f));
+        self
+    }
+
+    /// Cancel the LLM call if it takes longer than `ms` milliseconds.
+    /// Returns `TermiError::Timeout` when triggered.
+    pub fn timeout_ms(mut self, ms: u64) -> Self {
+        self.timeout_ms = Some(ms);
+        self
+    }
+
     /// Finalise the builder and return a `Step`.
     ///
     /// # Panics
@@ -96,6 +132,8 @@ impl StepBuilder {
             output_key: self.output_key.unwrap_or_else(|| {
                 panic!("Step \"{}\": store_as() must be called before finish()", self.name)
             }),
+            error_handler: self.error_handler,
+            timeout_ms: self.timeout_ms,
         }
     }
 }

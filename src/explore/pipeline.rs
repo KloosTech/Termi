@@ -1,18 +1,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
 use tracing::{info, warn};
 
 use crate::error::TermiError;
-use crate::explore::prompts::{
-    build_filter_prompt, build_summary_prompt, format_file_contents, format_file_list,
-};
+use crate::explore::prompts::{format_file_contents, format_file_list};
 use crate::explore::walker::{walk_directory, FileEntry};
 use crate::ollama::OllamaClient;
 use crate::workflow::context::WorkflowContext;
-use crate::workflow::runner::Workflow;
-use crate::workflow::step::StepBuilder;
+use crate::workflow::presets;
 
 pub struct ExploreConfig {
     pub model: String,
@@ -54,23 +50,13 @@ impl ExplorePipeline {
         let file_list_str = format_file_list(&entries);
 
         // ── Step 2: LLM identifies interesting files ──────────────────────────
-        let filter_schema = json!({"type": "array", "items": {"type": "string"}});
-        let model = self.config.model.clone();
-
-        let filter_workflow = Workflow::builder()
-            .step(
-                StepBuilder::new("filter_files")
-                    .model(&model)
-                    .prompt(|ctx| build_filter_prompt(ctx.get_str("file_list")))
-                    .output_json_schema(filter_schema)
-                    .store_as("interesting_files"),
-            )
-            .build();
-
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", &file_list_str);
 
-        let ctx = filter_workflow.run(Arc::clone(&self.client), ctx).await?;
+        let ctx = presets::filter_files(&self.config.model)
+            .build()
+            .run(Arc::clone(&self.client), ctx)
+            .await?;
 
         let interesting_paths: Vec<String> = ctx
             .get_array("interesting_files")
@@ -124,20 +110,13 @@ impl ExplorePipeline {
         // ── Step 4: LLM summarizes the project ────────────────────────────────
         let contents_block = format_file_contents(&file_contents);
 
-        let summary_workflow = Workflow::builder()
-            .step(
-                StepBuilder::new("summarize")
-                    .model(&model)
-                    .prompt(|ctx| build_summary_prompt(ctx.get_str("file_contents")))
-                    .output_text()
-                    .store_as("summary"),
-            )
-            .build();
-
         let mut ctx2 = WorkflowContext::new();
         ctx2.set("file_contents", &contents_block);
 
-        let ctx2 = summary_workflow.run(Arc::clone(&self.client), ctx2).await?;
+        let ctx2 = presets::summarize_content(&self.config.model)
+            .build()
+            .run(Arc::clone(&self.client), ctx2)
+            .await?;
 
         Ok(ctx2.get_str("summary").to_string())
     }
@@ -198,7 +177,7 @@ mod tests {
 
         let result = pipeline.run(dir.path()).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TermiError::Pipeline(_)));
+        assert!(matches!(result.unwrap_err(), TermiError::StepFailed { .. }));
     }
 
     #[tokio::test]
