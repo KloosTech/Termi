@@ -15,9 +15,9 @@ use crate::workflow::context::WorkflowContext;
 use crate::workflow::events::StepEvent;
 use crate::workflow::http::{HttpStep, HttpStepBuilder, JsRendering};
 use crate::workflow::shell::{ShellStep, ShellStepBuilder};
-use crate::workflow::step::{Step, StepBuilder};
+use crate::workflow::step::{Step, StepBuilder, StepErrorAction};
 
-// ── WorkflowNode ──────────────────────────────────────────────────────────────
+// ── WorkflowNode ─────────────���────────────────────────────────���───────────────
 
 pub enum WorkflowNode {
     /// A single LLM streaming call.
@@ -26,7 +26,10 @@ pub enum WorkflowNode {
     Shell(ShellStep),
     /// Fetch a URL and store the body (optionally as Markdown) in the context.
     Http(HttpStep),
-    Parallel(Vec<Step>),
+    /// Run all steps concurrently and merge their outputs.
+    /// `partial_ok`: when true, individual failures record error context keys
+    /// and are skipped; when false, the first failure aborts the workflow.
+    Parallel { steps: Vec<Step>, partial_ok: bool },
     Transform {
         name: &'static str,
         f: Box<dyn Fn(&mut WorkflowContext) + Send + Sync>,
@@ -41,9 +44,11 @@ pub enum WorkflowNode {
         body: Box<WorkflowNode>,
         max_iterations: usize,
     },
+    /// Run `primary`; if it fails, run `fallback` with the same context.
+    Fallback { primary: Step, fallback: Step },
 }
 
-// ── Workflow ──────────────────────────────────────────────────────────────────
+// ── Workflow ─────��──────────────────────────���─────────────────────────────────
 
 pub struct Workflow {
     nodes: Vec<WorkflowNode>,
@@ -70,7 +75,7 @@ impl Workflow {
     }
 }
 
-// ── Node execution ────────────────────────────────────────────────────────────
+// ── Node execution ───────────���────────────────────────────────────���───────────
 
 type NodeFuture<'a> =
     Pin<Box<dyn Future<Output = Result<WorkflowContext, TermiError>> + Send + 'a>>;
@@ -87,7 +92,7 @@ fn run_node<'n>(
             WorkflowNode::Shell(shell) => run_shell(shell, ctx, &events).await,
             WorkflowNode::Http(http) => run_http(http, ctx, &events).await,
 
-            WorkflowNode::Parallel(steps) => {
+            WorkflowNode::Parallel { steps, partial_ok } => {
                 info!("▶  parallel block ({} steps)", steps.len());
                 let futs: Vec<_> = steps
                     .iter()
@@ -95,8 +100,17 @@ fn run_node<'n>(
                     .collect();
                 let results = join_all(futs).await;
                 let mut merged = ctx;
-                for r in results {
-                    merged.extend(&r?);
+                for (step, result) in steps.iter().zip(results) {
+                    match result {
+                        Ok(updated) => {
+                            merged.extend(&updated);
+                        }
+                        Err(e) if *partial_ok => {
+                            warn!(step = step.name, error = %e, "parallel step failed (partial_ok)");
+                            record_error_keys(&mut merged, step.name, &e);
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 info!("✓  parallel block complete");
                 Ok(merged)
@@ -134,11 +148,21 @@ fn run_node<'n>(
                 }
                 Ok(ctx)
             }
+
+            WorkflowNode::Fallback { primary, fallback } => {
+                match run_step(primary, Arc::clone(&client), ctx.clone(), events.clone()).await {
+                    Ok(updated) => Ok(updated),
+                    Err(e) => {
+                        warn!(step = primary.name, error = %e, "primary step failed, running fallback");
+                        run_step(fallback, client, ctx, events).await
+                    }
+                }
+            }
         }
     })
 }
 
-// ── Streaming accumulator ─────────────────────────────────────────────────────
+// ── Streaming accumulator ────────────���───────────────────────────��────────────
 
 async fn collect_stream(
     mut stream: BoxStream<ChatStreamChunk>,
@@ -162,7 +186,6 @@ async fn collect_stream(
             full_text.push_str(&chunk.message.content);
         }
         if chunk.done {
-            // Use the server's authoritative token count from the final chunk.
             token_count = chunk.eval_count.unwrap_or(token_count);
         }
     }
@@ -170,7 +193,7 @@ async fn collect_stream(
     Ok((full_text, token_count))
 }
 
-// ── Step execution ────────────────────────────────────────────────────────────
+// ── Step execution ────────────────────────────────────���───────────────────────
 
 async fn run_step(
     step: &Step,
@@ -222,12 +245,29 @@ async fn run_step(
     let (raw_text, token_count) = loop {
         match client.chat_stream(req.clone()).await {
             Ok(stream) => {
-                match collect_stream(stream, step.name, &events).await {
+                let collect_result = if let Some(ms) = step.timeout_ms {
+                    match tokio::time::timeout(
+                        Duration::from_millis(ms),
+                        collect_stream(stream, step.name, &events),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Err(TermiError::Timeout { step: step.name.to_string(), ms }),
+                    }
+                } else {
+                    collect_stream(stream, step.name, &events).await
+                };
+
+                match collect_result {
                     Ok(result) => break result,
+                    Err(e @ TermiError::Timeout { .. }) => {
+                        error!(step = step.name, "step timed out");
+                        return handle_step_error(step, e, ctx);
+                    }
                     Err(e) if attempts < step.max_retries => {
                         attempts += 1;
                         warn!(step = step.name, attempt = attempts, error = %e, "step failed mid-stream, retrying");
-                        // Reset the TUI buffer for this step on retry.
                         if let Some(tx) = &events {
                             let _ = tx
                                 .send(StepEvent::StepStarted {
@@ -239,7 +279,11 @@ async fn run_step(
                     }
                     Err(e) => {
                         error!(step = step.name, error = %e, "step failed");
-                        return Err(e);
+                        let wrapped = TermiError::StepFailed {
+                            step: step.name.to_string(),
+                            source: Box::new(e),
+                        };
+                        return handle_step_error(step, wrapped, ctx);
                     }
                 }
             }
@@ -249,7 +293,11 @@ async fn run_step(
             }
             Err(e) => {
                 error!(step = step.name, error = %e, "step failed");
-                return Err(e);
+                let wrapped = TermiError::StepFailed {
+                    step: step.name.to_string(),
+                    source: Box::new(e),
+                };
+                return handle_step_error(step, wrapped, ctx);
             }
         }
     };
@@ -259,10 +307,17 @@ async fn run_step(
 
     debug!(step = step.name, raw_len = raw.len(), "raw LLM response");
 
-    let value = step.output_format.parse_and_validate(&raw).map_err(|e| {
-        error!(step = step.name, error = %e, "output validation failed");
-        e
-    })?;
+    let value = match step.output_format.parse_and_validate(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(step = step.name, error = %e, "output validation failed");
+            let wrapped = TermiError::StepFailed {
+                step: step.name.to_string(),
+                source: Box::new(e),
+            };
+            return handle_step_error(step, wrapped, ctx);
+        }
+    };
 
     let value = match &step.transform_output {
         Some(f) => f(value, &ctx),
@@ -287,7 +342,34 @@ async fn run_step(
     Ok(ctx)
 }
 
-// ── Context snapshot helper ───────────────────────────────────────────────────
+// ── Error handling helpers ─────────��──────────────────────────────────────────
+
+fn handle_step_error(
+    step: &Step,
+    err: TermiError,
+    mut ctx: WorkflowContext,
+) -> Result<WorkflowContext, TermiError> {
+    if let Some(handler) = &step.error_handler {
+        match handler(&err, &ctx) {
+            StepErrorAction::UseDefault(v) => {
+                ctx.set(step.output_key, &v);
+                record_error_keys(&mut ctx, step.name, &err);
+                return Ok(ctx);
+            }
+            StepErrorAction::Abort => {}
+        }
+    }
+    Err(err)
+}
+
+fn record_error_keys(ctx: &mut WorkflowContext, step_name: &str, err: &TermiError) {
+    ctx.set("__last_error_step", step_name);
+    ctx.set("__last_error_msg", err.to_string());
+    let count = ctx.get("__error_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    ctx.set("__error_count", count + 1);
+}
+
+// ── Context snapshot helper ────────────��─────────────────────────────────���────
 
 async fn emit_snapshot(ctx: &WorkflowContext, events: &Option<mpsc::Sender<StepEvent>>) {
     if let Some(tx) = events {
@@ -297,7 +379,7 @@ async fn emit_snapshot(ctx: &WorkflowContext, events: &Option<mpsc::Sender<StepE
     }
 }
 
-// ── Shell step execution ──────────────────────────────────────────────────────
+// ── Shell step execution ─────────────���───────────────────────────��────────────
 
 async fn run_shell(
     shell: &ShellStep,
@@ -479,9 +561,6 @@ async fn fetch_static(
         .map_err(|e| TermiError::Pipeline(format!("Failed to read response body: {e}")))
 }
 
-// Two cfg variants of fetch_js: one that actually calls Playwright, one that
-// returns a helpful runtime error when the feature is not compiled in.
-
 #[cfg(feature = "js-render")]
 async fn fetch_js(url: &str, _timeout_secs: u64) -> Result<String, TermiError> {
     use playwright_rs::Playwright;
@@ -516,7 +595,6 @@ async fn fetch_js(url: &str, _timeout_secs: u64) -> Result<String, TermiError> {
         .await
         .map_err(|e| TermiError::Pipeline(format!("Navigation to {url} failed: {e}")))?;
 
-    // Give JS time to settle after initial load.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let html = page
@@ -563,21 +641,44 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Add a shell-command step.
     pub fn shell(mut self, step: ShellStepBuilder) -> Self {
         self.nodes.push(WorkflowNode::Shell(step.finish()));
         self
     }
 
-    /// Add an HTTP-fetch step.
     pub fn http(mut self, step: HttpStepBuilder) -> Self {
         self.nodes.push(WorkflowNode::Http(step.finish()));
         self
     }
 
+    /// Add a group of steps that run concurrently. All must succeed (use
+    /// `parallel_partial` to tolerate individual failures).
     pub fn parallel(mut self, steps: Vec<StepBuilder>) -> Self {
         let steps = steps.into_iter().map(|s| s.finish()).collect();
-        self.nodes.push(WorkflowNode::Parallel(steps));
+        self.nodes.push(WorkflowNode::Parallel { steps, partial_ok: false });
+        self
+    }
+
+    /// Like `parallel`, but individual step failures are recorded as error
+    /// context keys and skipped rather than aborting the workflow.
+    pub fn parallel_partial(mut self, steps: Vec<StepBuilder>) -> Self {
+        let steps = steps.into_iter().map(|s| s.finish()).collect();
+        self.nodes.push(WorkflowNode::Parallel { steps, partial_ok: true });
+        self
+    }
+
+    /// Run `primary`; if it fails, run `fallback` with the same context.
+    pub fn step_with_fallback(mut self, primary: StepBuilder, fallback: StepBuilder) -> Self {
+        self.nodes.push(WorkflowNode::Fallback {
+            primary: primary.finish(),
+            fallback: fallback.finish(),
+        });
+        self
+    }
+
+    /// Absorb all nodes from `other` into this builder (composition primitive).
+    pub fn extend(mut self, other: WorkflowBuilder) -> Self {
+        self.nodes.extend(other.nodes);
         self
     }
 
@@ -641,7 +742,7 @@ impl Default for WorkflowBuilder {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Tests ──────────────���──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -742,7 +843,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TermiError::Pipeline(_)));
+        assert!(matches!(result.unwrap_err(), TermiError::StepFailed { .. }));
     }
 
     #[tokio::test]
@@ -942,7 +1043,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctx.get_str("out"), "final");
+        assert_eq!(ctx.get_str("out"), "final ");
         assert_eq!(client.recorded_calls().await.len(), 3); // 2 failures + 1 success
     }
 
@@ -1176,5 +1277,252 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TermiError::Pipeline(_)));
+    }
+
+    #[tokio::test]
+    async fn test_extend_merges_steps() {
+        let client = make_client("ok");
+
+        let part_a = Workflow::builder().step(
+            StepBuilder::new("a")
+                .model("llama3")
+                .prompt(|_| "pa".to_string())
+                .output_text()
+                .store_as("ra"),
+        );
+        let part_b = Workflow::builder().step(
+            StepBuilder::new("b")
+                .model("llama3")
+                .prompt(|_| "pb".to_string())
+                .output_text()
+                .store_as("rb"),
+        );
+
+        let ctx = part_a
+            .extend(part_b)
+            .build()
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert!(ctx.contains("ra"));
+        assert!(ctx.contains("rb"));
+        assert_eq!(client.recorded_calls().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_on_error_use_default_continues() {
+        let client = make_client("not json");
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+
+        let wf = Workflow::builder()
+            .step(
+                StepBuilder::new("risky")
+                    .model("llama3")
+                    .prompt(|_| "list things".to_string())
+                    .output_json_schema(schema)
+                    .store_as("things")
+                    .on_error(|_err, _ctx| {
+                        StepErrorAction::UseDefault(Value::Array(vec![]))
+                    }),
+            )
+            .step(
+                StepBuilder::new("next")
+                    .model("llama3")
+                    .prompt(|_| "continue".to_string())
+                    .output_text()
+                    .store_as("result"),
+            )
+            .build();
+
+        let ctx = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.get_array("things").len(), 0);
+        assert_eq!(ctx.get_str("__last_error_step"), "risky");
+        assert!(!ctx.get_str("__last_error_msg").is_empty());
+        assert_eq!(ctx.get("__error_count").and_then(|v| v.as_u64()), Some(1));
+        assert!(ctx.contains("result"));
+    }
+
+    #[tokio::test]
+    async fn test_on_error_abort_propagates() {
+        let client = make_client("not json");
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+
+        let wf = Workflow::builder()
+            .step(
+                StepBuilder::new("risky")
+                    .model("llama3")
+                    .prompt(|_| "list things".to_string())
+                    .output_json_schema(schema)
+                    .store_as("things")
+                    .on_error(|_err, _ctx| StepErrorAction::Abort),
+            )
+            .build();
+
+        let result = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_step_with_fallback_uses_fallback_on_failure() {
+        let client = Arc::new(
+            MockOllamaClient::new("llama3").with_responses(["not json", "fallback ok"]),
+        );
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+
+        let wf = Workflow::builder()
+            .step_with_fallback(
+                StepBuilder::new("primary")
+                    .model("llama3")
+                    .prompt(|_| "primary prompt".to_string())
+                    .output_json_schema(schema)
+                    .store_as("out"),
+                StepBuilder::new("fallback")
+                    .model("llama3")
+                    .prompt(|_| "fallback prompt".to_string())
+                    .output_text()
+                    .store_as("out"),
+            )
+            .build();
+
+        let ctx = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.get_str("out"), "fallback ok ");
+        assert_eq!(client.recorded_calls().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_step_with_fallback_skips_fallback_on_success() {
+        let client = Arc::new(
+            MockOllamaClient::new("llama3")
+                .with_responses([r#"["a","b"]"#, "should not be called"]),
+        );
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+
+        let wf = Workflow::builder()
+            .step_with_fallback(
+                StepBuilder::new("primary")
+                    .model("llama3")
+                    .prompt(|_| "primary prompt".to_string())
+                    .output_json_schema(schema)
+                    .store_as("out"),
+                StepBuilder::new("fallback")
+                    .model("llama3")
+                    .prompt(|_| "fallback prompt".to_string())
+                    .output_text()
+                    .store_as("out"),
+            )
+            .build();
+
+        let ctx = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.get_array("out").len(), 2);
+        assert_eq!(client.recorded_calls().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_parallel_all_succeed() {
+        let client = Arc::new(
+            MockOllamaClient::new("llama3").with_responses(["resp_x", "resp_y"]),
+        );
+
+        let wf = Workflow::builder()
+            .parallel(vec![
+                StepBuilder::new("px")
+                    .model("llama3")
+                    .prompt(|_| "prompt x".to_string())
+                    .output_text()
+                    .store_as("rx"),
+                StepBuilder::new("py")
+                    .model("llama3")
+                    .prompt(|_| "prompt y".to_string())
+                    .output_text()
+                    .store_as("ry"),
+            ])
+            .build();
+
+        let ctx = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert!(ctx.contains("rx"));
+        assert!(ctx.contains("ry"));
+        assert_eq!(client.recorded_calls().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_parallel_partial_continues_past_failure() {
+        let client = Arc::new(
+            MockOllamaClient::new("llama3").with_responses(["not json", "good"]),
+        );
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+
+        let wf = Workflow::builder()
+            .parallel_partial(vec![
+                StepBuilder::new("bad")
+                    .model("llama3")
+                    .prompt(|_| "bad prompt".to_string())
+                    .output_json_schema(schema)
+                    .store_as("bad_out"),
+                StepBuilder::new("good")
+                    .model("llama3")
+                    .prompt(|_| "good prompt".to_string())
+                    .output_text()
+                    .store_as("good_out"),
+            ])
+            .build();
+
+        let ctx = wf
+            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.get_str("good_out"), "good ");
+        assert_eq!(ctx.get_str("__last_error_step"), "bad");
+        assert_eq!(ctx.get("__error_count").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_timeout_returns_timeout_error() {
+        use tokio::time::Duration;
+
+        let client = Arc::new(crate::ollama::mock::SlowMockOllamaClient::new(200));
+
+        let wf = Workflow::builder()
+            .step(
+                StepBuilder::new("slow")
+                    .model("llama3")
+                    .prompt(|_| "slow prompt".to_string())
+                    .output_text()
+                    .store_as("out")
+                    .timeout_ms(50),
+            )
+            .build();
+
+        let result = wf
+            .run(client as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .await;
+
+        assert!(
+            matches!(result, Err(TermiError::Timeout { ms: 50, .. })),
+            "expected Timeout, got: {:?}",
+            result
+        );
+
+        let _ = Duration::from_millis(0);
     }
 }

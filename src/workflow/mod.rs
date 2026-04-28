@@ -2,6 +2,7 @@ pub mod context;
 pub mod events;
 pub mod http;
 pub mod output;
+pub mod presets;
 pub mod runner;
 pub mod shell;
 pub mod step;
