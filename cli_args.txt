@@ -1,0 +1,1 @@
+--debug --model gemma4:e4b searchtor --query Donald Trump Latest News

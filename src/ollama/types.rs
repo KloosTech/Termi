@@ -60,6 +60,12 @@ pub struct ChatStreamChunk {
     pub done: bool,
     #[serde(default)]
     pub done_reason: Option<String>,
+    /// Token count, present only on the final chunk (done: true).
+    #[serde(default)]
+    pub eval_count: Option<u32>,
+    /// Generation duration in nanoseconds, present only on the final chunk.
+    #[serde(default)]
+    pub eval_duration: Option<u64>,
 }
 
 // ── Generate ─────────────────────────────────────────────────────────────────

@@ -53,6 +53,67 @@ Workflow::builder()
 
 ---
 
+### `.shell(ShellStepBuilder) -> Self`
+
+Runs a shell command via `sh -c` and stores stdout, stderr, and exit code in the context. The step **never errors on a non-zero exit code** — the code is stored so subsequent steps can decide what to do. A launch failure (e.g. command not found, timeout) is an error.
+
+```rust
+Workflow::builder()
+    .shell(
+        ShellStepBuilder::new("run_tests")
+            .command(|_| "cargo test 2>&1".to_string())
+            .store_stdout_as("test_output")
+            .store_exit_code_as("test_exit_code")
+            .timeout_secs(120),
+    )
+    .step(
+        StepBuilder::new("analyse_failures")
+            .model("llama3")
+            .prompt(|ctx| {
+                let code = ctx.get_i64("test_exit_code").unwrap_or(0);
+                if code == 0 {
+                    "All tests passed. Write a one-line success summary.".to_string()
+                } else {
+                    format!("Diagnose these test failures:\n{}", ctx.get_str("test_output"))
+                }
+            })
+            .output_text()
+            .store_as("diagnosis"),
+    )
+    .build();
+```
+
+---
+
+### `.http(HttpStepBuilder) -> Self`
+
+Fetches a URL with `reqwest` and stores the response body in the context. Optionally converts HTML to Markdown (via `htmd`) to produce much shorter, cleaner text for LLM prompts. For JavaScript-rendered pages, a headless Chromium can be used instead — see the [JS rendering section](#js-rendering) below.
+
+```rust
+Workflow::builder()
+    .http(
+        HttpStepBuilder::new("fetch_changelog")
+            .url(|ctx| format!("https://github.com/{}/releases", ctx.get_str("repo")))
+            .store_as("changelog")
+            .strip_html()              // HTML → Markdown
+            .timeout_secs(15)
+            .header("User-Agent", "termi/0.1"),
+    )
+    .step(
+        StepBuilder::new("summarise_releases")
+            .model("llama3")
+            .prompt(|ctx| format!(
+                "Summarise the latest release notes:\n{}",
+                ctx.get_str("changelog")
+            ))
+            .output_text()
+            .store_as("release_summary"),
+    )
+    .build();
+```
+
+---
+
 ### `.parallel(Vec<StepBuilder>) -> Self`
 
 Runs multiple LLM steps **concurrently**. All results are merged into the context once every step finishes. Use this when steps are independent of each other.
@@ -369,6 +430,142 @@ StepBuilder::new("keywords")
 
 ---
 
+## ShellStepBuilder
+
+Create a shell step with `ShellStepBuilder::new("name")` and chain the methods below. `.command()` and `.store_stdout_as()` are required.
+
+### Required methods
+
+| Method | Description |
+|--------|-------------|
+| `.command(\|ctx\| String)` | Closure that returns the shell command string (passed to `sh -c`) |
+| `.store_stdout_as(&'static str)` | Context key where captured stdout is stored |
+
+### Optional methods
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `.store_stderr_as(&'static str)` | — | Context key where captured stderr is stored |
+| `.store_exit_code_as(&'static str)` | — | Context key where the exit code is stored as `i64` |
+| `.working_dir(\|ctx\| String)` | `"."` | Closure that returns the working directory path |
+| `.timeout_secs(u64)` | `60` | Abort the command after this many seconds |
+| `.skip_if(\|ctx\| bool)` | — | Skip the step when the closure returns `true` |
+
+### Notes
+
+- Commands run in the user's login shell via `sh -c "..."`.
+- A **non-zero exit code is not an error** — it is stored in the context. This lets you handle partial failures in subsequent steps.
+- A **timeout** or **launch failure** (e.g. `sh` not found) returns a `TermiError::Pipeline`.
+- The step appears in the TUI completed list with elapsed time (no token count, since no LLM is involved).
+
+```rust
+ShellStepBuilder::new("git_log")
+    .command(|ctx| format!(
+        "git -C {} log --oneline -20",
+        ctx.get_str("project_path")
+    ))
+    .store_stdout_as("commits")
+    .store_stderr_as("git_errors")
+    .store_exit_code_as("git_exit")
+    .working_dir(|ctx| ctx.get_str("project_path").to_string())
+    .timeout_secs(10)
+    .skip_if(|ctx| !ctx.get_bool("include_git"))
+```
+
+---
+
+## HttpStepBuilder
+
+Create an HTTP step with `HttpStepBuilder::new("name")` and chain the methods below. `.url()` and `.store_as()` are required.
+
+### Required methods
+
+| Method | Description |
+|--------|-------------|
+| `.url(\|ctx\| String)` | Closure that returns the URL to fetch |
+| `.store_as(&'static str)` | Context key where the response body is stored |
+
+### Optional methods
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `.store_status_as(&'static str)` | — | Store the HTTP status code as `i64`. When set, non-2xx responses are stored rather than treated as errors |
+| `.strip_html()` | `false` | Convert the HTML response to Markdown via `htmd` before storing |
+| `.render_js()` | `false` | Fetch via headless Chromium (see [JS rendering](#js-rendering)) |
+| `.timeout_secs(u64)` | `30` | Request timeout |
+| `.header(name, value)` | — | Append a request header (can be called multiple times) |
+| `.skip_if(\|ctx\| bool)` | — | Skip the step when the closure returns `true` |
+
+### Notes
+
+- By default, non-2xx responses return `TermiError::Pipeline`. Set `.store_status_as()` to handle them in the workflow instead.
+- `.strip_html()` is strongly recommended when passing web content to an LLM — it removes navigation, scripts, and boilerplate, reducing prompt size by 80–95%.
+- A `User-Agent: termi/0.1` header is sent automatically.
+
+```rust
+HttpStepBuilder::new("fetch_docs")
+    .url(|ctx| format!(
+        "https://docs.rs/crate/{}/latest",
+        ctx.get_str("crate_name")
+    ))
+    .store_as("docs")
+    .store_status_as("docs_status")
+    .strip_html()
+    .timeout_secs(20)
+    .header("Accept", "text/html")
+    .skip_if(|ctx| ctx.get_bool("offline"))
+```
+
+---
+
+## JS rendering
+
+For pages that require JavaScript to display their content (single-page apps, dashboards, dynamically loaded feeds), use `.render_js()` on `HttpStepBuilder`. This launches a headless Chromium instance via [Playwright](https://playwright.dev), navigates to the URL, waits 2 seconds for scripts to settle, and then captures the fully-rendered DOM.
+
+### Setup
+
+1. Enable the `js-render` Cargo feature:
+
+```bash
+cargo build --features js-render
+cargo run --features js-render -- explore .
+```
+
+2. Install Node.js 18+ and the Playwright browser binaries (one-time):
+
+```bash
+npx playwright@1.59.1 install chromium
+```
+
+### Example
+
+```rust
+Workflow::builder()
+    .http(
+        HttpStepBuilder::new("fetch_spa")
+            .url(|_| "https://example.com/dashboard".to_string())
+            .store_as("dashboard_html")
+            .strip_html()
+            .render_js()          // headless Chromium via Playwright
+            .timeout_secs(30),
+    )
+    .step(
+        StepBuilder::new("summarise_dashboard")
+            .model("llama3")
+            .prompt(|ctx| format!(
+                "Summarise the key metrics shown:\n{}",
+                ctx.get_str("dashboard_html")
+            ))
+            .output_text()
+            .store_as("summary"),
+    )
+    .build();
+```
+
+If `render_js()` is used without the `js-render` feature, a clear runtime error is returned pointing to the required build flag. If Node.js or the browser binaries are missing, the error message includes the install command.
+
+---
+
 ## WorkflowContext
 
 `WorkflowContext` is the shared state bag passed through every node. Pre-populate it before calling `run`, and read results from it afterwards.
@@ -620,6 +817,311 @@ let ctx = WorkflowContext::new()
 ```
 
 > **Note:** In `transform_output`, `ctx` still holds the value from the _previous_ iteration when the current step began. Update `results` in the step's `store_as` key to accumulate properly, or use a separate `transform` node after the loop to reshape accumulated data.
+
+---
+
+### 6. Shell → LLM pipeline (test failure analysis)
+
+```rust
+let wf = Workflow::builder()
+    .shell(
+        ShellStepBuilder::new("run_tests")
+            .command(|_| "cargo test -- --color never 2>&1".to_string())
+            .store_stdout_as("test_output")
+            .store_exit_code_as("test_exit"),
+    )
+    .if_else_step(
+        |ctx| ctx.get_i64("test_exit").unwrap_or(1) == 0,
+        StepBuilder::new("all_passed")
+            .model("llama3")
+            .prompt(|_| "All tests passed. Write a short success message.".to_string())
+            .output_text()
+            .store_as("report"),
+        StepBuilder::new("diagnose")
+            .model("llama3")
+            .prompt(|ctx| format!(
+                "Diagnose these Rust test failures and suggest fixes:\n\n{}",
+                ctx.get_str("test_output")
+            ))
+            .output_text()
+            .store_as("report"),
+    )
+    .build();
+```
+
+### 7. HTTP fetch → LLM pipeline (research assistant)
+
+Fetch a page, strip the HTML to Markdown, then summarise or answer questions about it:
+
+```rust
+let wf = Workflow::builder()
+    .http(
+        HttpStepBuilder::new("fetch")
+            .url(|ctx| ctx.get_str("url").to_string())
+            .store_as("content")
+            .strip_html()
+            .timeout_secs(20),
+    )
+    .step(
+        StepBuilder::new("answer")
+            .model("llama3")
+            .prompt(|ctx| format!(
+                "Using only the content below, answer: {}\n\nContent:\n{}",
+                ctx.get_str("question"),
+                ctx.get_str("content"),
+            ))
+            .output_text()
+            .store_as("answer"),
+    )
+    .build();
+
+let ctx = WorkflowContext::new()
+    .with("url", "https://doc.rust-lang.org/book/ch01-00-getting-started.html")
+    .with("question", "What are the main steps to install Rust?");
+```
+
+---
+
+## Adding a new workflow to the CLI
+
+This section walks through adding a new command end-to-end. The example builds a `review` command that diffs the current git branch and asks the LLM to review the changes.
+
+```
+cargo run -- review --base main
+```
+
+There are four files to touch, always in this order:
+
+1. Create the pipeline module  
+2. Declare the module in `main.rs`  
+3. Add the CLI argument to `cli.rs`  
+4. Dispatch it in `main.rs`
+
+---
+
+### Step 1 — Create the pipeline module
+
+Create a directory and two files:
+
+```
+src/
+  review/
+    mod.rs
+    pipeline.rs
+```
+
+**`src/review/mod.rs`**
+
+```rust
+pub mod pipeline;
+
+pub use pipeline::ReviewPipeline;
+```
+
+**`src/review/pipeline.rs`**
+
+This is where the workflow lives. Follow the same structure as `src/explore/pipeline.rs`:
+
+```rust
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
+use crate::error::TermiError;
+use crate::ollama::OllamaClient;
+use crate::workflow::context::WorkflowContext;
+use crate::workflow::events::StepEvent;
+use crate::workflow::runner::Workflow;
+use crate::workflow::shell::ShellStepBuilder;
+use crate::workflow::step::StepBuilder;
+
+pub struct ReviewPipeline {
+    client: Arc<dyn OllamaClient>,
+    model: String,
+    events: Option<mpsc::Sender<StepEvent>>,
+}
+
+impl ReviewPipeline {
+    pub fn new(client: Arc<dyn OllamaClient>, model: String) -> Self {
+        Self { client, model, events: None }
+    }
+
+    pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
+        self.events = Some(tx);
+        self
+    }
+
+    pub async fn run(&self, base: &str) -> Result<String, TermiError> {
+        let mut shell_builder = Workflow::builder().shell(
+            ShellStepBuilder::new("git_diff")
+                .command(move |_| format!("git diff {base}...HEAD"))
+                .store_stdout_as("diff")
+                .store_exit_code_as("diff_exit")
+                .timeout_secs(15),
+        );
+        if let Some(tx) = self.events.clone() {
+            shell_builder = shell_builder.with_events(tx);
+        }
+
+        let mut llm_builder = Workflow::builder().step(
+            StepBuilder::new("review")
+                .model(&self.model)
+                .prompt(|ctx| {
+                    let diff = ctx.get_str("diff");
+                    if diff.trim().is_empty() {
+                        "No changes found. Reply: nothing to review.".to_string()
+                    } else {
+                        format!(
+                            "Review this git diff. Call out bugs, risky changes, \
+                             and style issues. Be concise.\n\n```diff\n{diff}\n```"
+                        )
+                    }
+                })
+                .output_text()
+                .store_as("review"),
+        );
+        if let Some(tx) = self.events.clone() {
+            llm_builder = llm_builder.with_events(tx);
+        }
+
+        // Run the two workflows in sequence, sharing the context.
+        let ctx = WorkflowContext::new();
+        let ctx = shell_builder.build().run(Arc::clone(&self.client), ctx).await?;
+        let ctx = llm_builder.build().run(Arc::clone(&self.client), ctx).await?;
+
+        if let Some(tx) = &self.events {
+            let _ = tx.send(StepEvent::WorkflowComplete).await;
+        }
+
+        Ok(ctx.get_str("review").to_string())
+    }
+}
+```
+
+> **Pattern notes**
+> - Pass `events` into every `Workflow::builder()` call using the same `if let Some(tx) = self.events.clone()` guard — this keeps the TUI in sync.
+> - Send `StepEvent::WorkflowComplete` at the very end so the TUI knows to switch to the reading + Q&A view.
+> - Return the final result as a plain `String` — `main.rs` prints it after the TUI exits.
+
+---
+
+### Step 2 — Declare the module in `main.rs`
+
+Add `mod review;` alongside the other module declarations at the top of `src/main.rs`, and bring the pipeline into scope:
+
+```rust
+mod cli;
+mod error;
+mod explore;
+mod ollama;
+mod review;      // ← add this
+mod tui;
+mod workflow;
+
+// ...existing use statements...
+use review::ReviewPipeline;   // ← add this
+```
+
+---
+
+### Step 3 — Add the CLI argument to `cli.rs`
+
+Open `src/cli.rs` and add a new variant to the `Command` enum. The doc-comment becomes the `--help` description.
+
+```rust
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Explore a directory and produce a project summary
+    Explore {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Review git changes between HEAD and a base branch
+    Review {                                         // ← add this variant
+        /// Branch or commit to diff against
+        #[arg(long, default_value = "main")]
+        base: String,
+    },
+
+    /// List models available in Ollama
+    ListModels,
+    /// Generate embeddings for TEXT and print the vector
+    Embed {
+        #[arg(value_name = "TEXT")]
+        text: String,
+    },
+}
+```
+
+---
+
+### Step 4 — Dispatch the command in `main.rs`
+
+Two things to update in `main.rs`:
+
+**4a.** Expand the `will_run_tui` check so tracing is suppressed when your new command uses the TUI:
+
+```rust
+let will_run_tui = matches!(
+    cli.command,
+    Command::Explore { .. } | Command::Review { .. }  // ← add your variant
+) && !cli.mock;
+```
+
+**4b.** Add the match arm for `Command::Review`:
+
+```rust
+Command::Review { base } => {
+    if cli.mock {
+        let pipeline = ReviewPipeline::new(Arc::clone(&client), cli.model.clone());
+        let review = pipeline.run(&base).await.context("review pipeline failed")?;
+        println!("\n=== Code Review ===\n");
+        println!("{}", review);
+    } else {
+        let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+        let pipeline = ReviewPipeline::new(Arc::clone(&client), cli.model.clone())
+            .with_events(tx);
+
+        let handle = tokio::spawn(async move { pipeline.run(&base).await });
+
+        tui::run(rx, cli.model.clone(), "review".to_string(), Arc::clone(&client))
+            .await
+            .context("TUI error")?;
+
+        let review = handle.await.context("pipeline task panicked")??;
+        println!("\n=== Code Review ===\n");
+        println!("{}", review);
+    }
+}
+```
+
+---
+
+### Step 5 — Try it
+
+```bash
+# With a real Ollama server (shows the live TUI)
+cargo run -- --model llama3:8b review --base main
+
+# With the mock client (plain stdout, no TUI, useful for development)
+cargo run -- --mock review --base main
+```
+
+---
+
+### Checklist for any new workflow
+
+| # | What | Where |
+|---|------|-------|
+| 1 | Create `src/<name>/mod.rs` + `pipeline.rs` | new files |
+| 2 | Implement `Pipeline::new()`, `with_events()`, `run()` | `pipeline.rs` |
+| 3 | Send `StepEvent::WorkflowComplete` at the end of `run()` | `pipeline.rs` |
+| 4 | Pass `events` to every `Workflow::builder()` call | `pipeline.rs` |
+| 5 | Add `mod <name>;` and `use <name>::Pipeline;` | `src/main.rs` |
+| 6 | Add variant to `Command` enum | `src/cli.rs` |
+| 7 | Expand `will_run_tui` check | `src/main.rs` |
+| 8 | Add match arm with mock + TUI branches | `src/main.rs` |
 
 ---
 

@@ -34,6 +34,9 @@ impl OutputFormat {
                         "expected JSON output, got parse error: {e}\nRaw: {raw}"
                     ))
                 })?;
+                // Some models wrap the result in an object even when a bare array
+                // is requested. Try to extract it before validating.
+                let value = coerce_to_schema(value, schema);
                 validate_schema(&value, schema)?;
                 Ok(value)
             }
@@ -44,11 +47,25 @@ impl OutputFormat {
     pub fn ollama_format(&self) -> Option<Value> {
         match self {
             OutputFormat::Text => None,
-            OutputFormat::Json | OutputFormat::JsonSchema(_) => {
-                Some(Value::String("json".to_string()))
+            OutputFormat::Json => Some(Value::String("json".to_string())),
+            // Send the schema itself so Ollama uses constrained structured output.
+            OutputFormat::JsonSchema(schema) => Some(schema.clone()),
+        }
+    }
+}
+
+/// If the schema expects an array but `value` is an object, extract the first
+/// array-valued field. This handles models that wrap `[...]` in `{"key": [...]}`.
+fn coerce_to_schema(value: Value, schema: &Value) -> Value {
+    let expected = schema.get("type").and_then(|t| t.as_str());
+    if expected == Some("array") {
+        if let Value::Object(map) = &value {
+            if let Some(inner) = map.values().find(|v| v.is_array()) {
+                return inner.clone();
             }
         }
     }
+    value
 }
 
 /// Lightweight schema validation — checks `type` and, for object/array schemas,

@@ -88,6 +88,17 @@ impl WorkflowContext {
         self.values.remove(key)
     }
 
+    /// Returns all key-value pairs sorted by key, suitable for the debug panel.
+    pub fn snapshot(&self) -> Vec<(String, Value)> {
+        let mut entries: Vec<_> = self
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
     /// Merges all entries from `other` into `self`, overwriting on key conflict.
     pub(crate) fn extend(&mut self, other: &WorkflowContext) {
         for (k, v) in &other.values {

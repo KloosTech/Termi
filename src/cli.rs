@@ -17,6 +17,10 @@ pub struct Cli {
     #[arg(long)]
     pub mock: bool,
 
+    /// Show a live WorkflowContext inspector on the right side of the TUI
+    #[arg(long)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -28,6 +32,18 @@ pub enum Command {
         /// Path to the project directory to analyse
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
+    },
+    /// Searches different Index Sites for Torrent releases
+    Searchtor {
+        /// Search query — multiple words accepted without quotes:
+        ///   --query Donald Trump Latest News
+        #[arg(long = "query", num_args = 1..)]
+        query: Vec<String>,
+    },
+    /// Scaffold a new workflow interactively
+    New {
+        /// Name of the new workflow module (e.g. "review", "summarise")
+        name: String,
     },
     /// List models available in Ollama
     ListModels,

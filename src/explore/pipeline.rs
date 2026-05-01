@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::error::TermiError;
@@ -11,6 +12,7 @@ use crate::explore::prompts::{
 use crate::explore::walker::{walk_directory, FileEntry};
 use crate::ollama::OllamaClient;
 use crate::workflow::context::WorkflowContext;
+use crate::workflow::events::StepEvent;
 use crate::workflow::runner::Workflow;
 use crate::workflow::step::StepBuilder;
 
@@ -35,11 +37,17 @@ impl Default for ExploreConfig {
 pub struct ExplorePipeline {
     client: Arc<dyn OllamaClient>,
     config: ExploreConfig,
+    events: Option<mpsc::Sender<StepEvent>>,
 }
 
 impl ExplorePipeline {
     pub fn new(client: Arc<dyn OllamaClient>, config: ExploreConfig) -> Self {
-        Self { client, config }
+        Self { client, config, events: None }
+    }
+
+    pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
+        self.events = Some(tx);
+        self
     }
 
     pub async fn run(&self, root: &Path) -> Result<String, TermiError> {
@@ -57,15 +65,17 @@ impl ExplorePipeline {
         let filter_schema = json!({"type": "array", "items": {"type": "string"}});
         let model = self.config.model.clone();
 
-        let filter_workflow = Workflow::builder()
-            .step(
-                StepBuilder::new("filter_files")
-                    .model(&model)
-                    .prompt(|ctx| build_filter_prompt(ctx.get_str("file_list")))
-                    .output_json_schema(filter_schema)
-                    .store_as("interesting_files"),
-            )
-            .build();
+        let mut filter_builder = Workflow::builder().step(
+            StepBuilder::new("filter_files")
+                .model(&model)
+                .prompt(|ctx| build_filter_prompt(ctx.get_str("file_list")))
+                .output_json_schema(filter_schema)
+                .store_as("interesting_files"),
+        );
+        if let Some(tx) = self.events.clone() {
+            filter_builder = filter_builder.with_events(tx);
+        }
+        let filter_workflow = filter_builder.build();
 
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", &file_list_str);
@@ -79,6 +89,14 @@ impl ExplorePipeline {
             .collect();
 
         info!("explore: LLM selected {} files", interesting_paths.len());
+
+        if let Some(tx) = &self.events {
+            let _ = tx
+                .send(StepEvent::StatusUpdate {
+                    message: format!("Reading {} selected files...", interesting_paths.len()),
+                })
+                .await;
+        }
 
         // ── Step 3: Read the selected files ───────────────────────────────────
         let mut file_contents: Vec<(String, String)> = Vec::new();
@@ -124,20 +142,26 @@ impl ExplorePipeline {
         // ── Step 4: LLM summarizes the project ────────────────────────────────
         let contents_block = format_file_contents(&file_contents);
 
-        let summary_workflow = Workflow::builder()
-            .step(
-                StepBuilder::new("summarize")
-                    .model(&model)
-                    .prompt(|ctx| build_summary_prompt(ctx.get_str("file_contents")))
-                    .output_text()
-                    .store_as("summary"),
-            )
-            .build();
+        let mut summary_builder = Workflow::builder().step(
+            StepBuilder::new("summarize")
+                .model(&model)
+                .prompt(|ctx| build_summary_prompt(ctx.get_str("file_contents")))
+                .output_text()
+                .store_as("summary"),
+        );
+        if let Some(tx) = self.events.clone() {
+            summary_builder = summary_builder.with_events(tx);
+        }
+        let summary_workflow = summary_builder.build();
 
         let mut ctx2 = WorkflowContext::new();
         ctx2.set("file_contents", &contents_block);
 
         let ctx2 = summary_workflow.run(Arc::clone(&self.client), ctx2).await?;
+
+        if let Some(tx) = &self.events {
+            let _ = tx.send(StepEvent::WorkflowComplete).await;
+        }
 
         Ok(ctx2.get_str("summary").to_string())
     }
@@ -182,8 +206,8 @@ mod tests {
 
         let calls = client.recorded_calls().await;
         assert_eq!(calls.len(), 2, "expected exactly 2 LLM calls, got: {calls:?}");
-        assert!(matches!(&calls[0], MockCall::Chat { .. }), "call 0 should be Chat (filter)");
-        assert!(matches!(&calls[1], MockCall::Chat { .. }), "call 1 should be Chat (summarize)");
+        assert!(matches!(&calls[0], MockCall::ChatStream { .. }), "call 0 should be ChatStream (filter)");
+        assert!(matches!(&calls[1], MockCall::ChatStream { .. }), "call 1 should be ChatStream (summarize)");
     }
 
     #[tokio::test]

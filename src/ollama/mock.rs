@@ -12,7 +12,7 @@ use crate::ollama::types::*;
 #[derive(Debug, Clone, PartialEq)]
 pub enum MockCall {
     Chat { model: String, message_count: usize, has_system: bool },
-    ChatStream { model: String, message_count: usize },
+    ChatStream { model: String, message_count: usize, has_system: bool },
     Generate { model: String, prompt_len: usize },
     GenerateStream { model: String, prompt_len: usize },
     ListModels,
@@ -109,27 +109,49 @@ impl OllamaClient for MockOllamaClient {
         &self,
         req: ChatRequest,
     ) -> Result<BoxStream<ChatStreamChunk>, TermiError> {
+        let has_system = req.messages.iter().any(|m| m.role == "system");
+
+        // Check fail_remaining before recording the call — drop the guard before
+        // acquiring the calls lock to avoid holding two mutexes simultaneously.
+        {
+            let mut remaining = self.fail_remaining.lock().await;
+            if *remaining > 0 {
+                *remaining -= 1;
+                self.calls.lock().await.push(MockCall::ChatStream {
+                    model: req.model.clone(),
+                    message_count: req.messages.len(),
+                    has_system,
+                });
+                return Err(TermiError::Pipeline("mock failure".to_string()));
+            }
+        }
+
         self.calls.lock().await.push(MockCall::ChatStream {
             model: req.model.clone(),
             message_count: req.messages.len(),
+            has_system,
         });
+
         let model = req.model.clone();
-        let words: Vec<ChatStreamChunk> = self
-            .chat_response_text
-            .split_whitespace()
+        let words: Vec<&str> = self.chat_response_text.split_whitespace().collect();
+        let word_count = words.len();
+        let chunks: Vec<ChatStreamChunk> = words
+            .iter()
             .enumerate()
             .map(|(i, word)| {
-                let is_last = i == self.chat_response_text.split_whitespace().count() - 1;
+                let is_last = i == word_count - 1;
                 ChatStreamChunk {
                     model: model.clone(),
                     created_at: "2024-01-01T00:00:00Z".to_string(),
                     message: Message::assistant(format!("{} ", word)),
                     done: is_last,
                     done_reason: if is_last { Some("stop".to_string()) } else { None },
+                    eval_count: if is_last { Some(word_count as u32) } else { None },
+                    eval_duration: None,
                 }
             })
             .collect();
-        Ok(Box::pin(stream::iter(words.into_iter().map(Ok))))
+        Ok(Box::pin(stream::iter(chunks.into_iter().map(Ok))))
     }
 
     async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse, TermiError> {
