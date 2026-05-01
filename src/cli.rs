@@ -33,12 +33,16 @@ pub enum Command {
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
     },
-    /// Searches different Index Sites for Torrent releases
+    /// Deep analysis workflow: searches the web and produces a structured 7-part report
     Searchtor {
         /// Search query — multiple words accepted without quotes:
         ///   --query Donald Trump Latest News
         #[arg(long = "query", num_args = 1..)]
         query: Vec<String>,
+
+        /// Number of search queries to generate per analysis section (1–10)
+        #[arg(long = "depth", default_value_t = 3)]
+        depth: usize,
     },
     /// Scaffold a new workflow interactively
     New {
