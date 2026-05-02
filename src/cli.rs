@@ -44,6 +44,42 @@ pub enum Command {
         #[arg(long = "depth", default_value_t = 3)]
         depth: usize,
     },
+    /// Search for a TV series and add it to Sonarr
+    Sonarr {
+        /// Search query — multiple words accepted without quotes
+        #[arg(long = "query", num_args = 1..)]
+        query: Vec<String>,
+        /// Sonarr base URL
+        #[arg(long = "url", env = "SONARR_URL")]
+        url: String,
+        /// Sonarr API key
+        #[arg(long = "api-key", env = "SONARR_API_KEY")]
+        api_key: String,
+    },
+    /// Search for a movie and add it to Radarr
+    Radarr {
+        /// Search query — multiple words accepted without quotes
+        #[arg(long = "query", num_args = 1..)]
+        query: Vec<String>,
+        /// Radarr base URL
+        #[arg(long = "url", env = "RADARR_URL")]
+        url: String,
+        /// Radarr API key
+        #[arg(long = "api-key", env = "RADARR_API_KEY")]
+        api_key: String,
+    },
+    /// Search for an artist and add them to Lidarr
+    Lidarr {
+        /// Search query — multiple words accepted without quotes
+        #[arg(long = "query", num_args = 1..)]
+        query: Vec<String>,
+        /// Lidarr base URL
+        #[arg(long = "url", env = "LIDARR_URL")]
+        url: String,
+        /// Lidarr API key
+        #[arg(long = "api-key", env = "LIDARR_API_KEY")]
+        api_key: String,
+    },
     /// Scaffold a new workflow interactively
     New {
         /// Name of the new workflow module (e.g. "review", "summarise")
