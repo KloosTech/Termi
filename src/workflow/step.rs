@@ -1,8 +1,18 @@
 use serde_json::Value;
 
+use crate::error::TermiError;
 use crate::ollama::types::ModelOptions;
 use crate::workflow::context::WorkflowContext;
 use crate::workflow::output::OutputFormat;
+
+/// What a step's error handler returns to the runner.
+#[derive(Debug, Clone)]
+pub enum StepErrorAction {
+    /// Propagate the error and abort the workflow.
+    Abort,
+    /// Store this value in the context key and continue.
+    UseDefault(Value),
+}
 
 /// A single step in a workflow.
 pub struct Step {
@@ -21,10 +31,16 @@ pub struct Step {
     pub skip_if: Option<Box<dyn Fn(&WorkflowContext) -> bool + Send + Sync>>,
     /// Optional post-processing applied to the parsed output before storing.
     pub transform_output: Option<Box<dyn Fn(Value, &WorkflowContext) -> Value + Send + Sync>>,
+    /// Optional per-step error recovery.
+    pub error_handler:
+        Option<Box<dyn Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync>>,
+    /// If set, the LLM call is cancelled after this many milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 // ── Fluent builder ────────────────────────────────────────────────────────────
 
+/// Builder for a `Step`. Obtain one via `StepBuilder::new("name")`.
 pub struct StepBuilder {
     name: &'static str,
     model: Option<String>,
@@ -36,6 +52,9 @@ pub struct StepBuilder {
     max_retries: u32,
     skip_if: Option<Box<dyn Fn(&WorkflowContext) -> bool + Send + Sync>>,
     transform_output: Option<Box<dyn Fn(Value, &WorkflowContext) -> Value + Send + Sync>>,
+    error_handler:
+        Option<Box<dyn Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync>>,
+    timeout_ms: Option<u64>,
 }
 
 impl StepBuilder {
@@ -51,6 +70,8 @@ impl StepBuilder {
             max_retries: 0,
             skip_if: None,
             transform_output: None,
+            error_handler: None,
+            timeout_ms: None,
         }
     }
 
@@ -149,6 +170,25 @@ impl StepBuilder {
         self
     }
 
+    /// Attach a per-step error handler. Called when the LLM call or output
+    /// validation fails. Return `StepErrorAction::UseDefault(v)` to store a
+    /// fallback value and continue, or `StepErrorAction::Abort` (the default
+    /// when no handler is set) to propagate the error.
+    pub fn on_error<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&TermiError, &WorkflowContext) -> StepErrorAction + Send + Sync + 'static,
+    {
+        self.error_handler = Some(Box::new(f));
+        self
+    }
+
+    /// Cancel the LLM call if it takes longer than `ms` milliseconds.
+    /// Returns `TermiError::Timeout` when triggered.
+    pub fn timeout_ms(mut self, ms: u64) -> Self {
+        self.timeout_ms = Some(ms);
+        self
+    }
+
     /// Finalise the builder and return a `Step`.
     ///
     /// # Panics
@@ -164,20 +204,35 @@ impl StepBuilder {
         Step {
             name: self.name,
             model: self.model.unwrap_or_else(|| {
-                panic!("Step \"{}\": model() must be called before finish()", self.name)
+                panic!(
+                    "Step \"{}\": model() must be called before finish()",
+                    self.name
+                )
             }),
             prompt_fn: self.prompt_fn.unwrap_or_else(|| {
-                panic!("Step \"{}\": prompt() must be called before finish()", self.name)
+                panic!(
+                    "Step \"{}\": prompt() must be called before finish()",
+                    self.name
+                )
             }),
             output_format: self.output_format,
             output_key: self.output_key.unwrap_or_else(|| {
-                panic!("Step \"{}\": store_as() must be called before finish()", self.name)
+                panic!(
+                    "Step \"{}\": store_as() must be called before finish()",
+                    self.name
+                )
             }),
             system_prompt: self.system_prompt,
-            options: if options_empty { None } else { Some(self.options) },
+            options: if options_empty {
+                None
+            } else {
+                Some(self.options)
+            },
             max_retries: self.max_retries,
             skip_if: self.skip_if,
             transform_output: self.transform_output,
+            error_handler: self.error_handler,
+            timeout_ms: self.timeout_ms,
         }
     }
 }

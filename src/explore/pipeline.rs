@@ -1,20 +1,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::error::TermiError;
-use crate::explore::prompts::{
-    build_filter_prompt, build_summary_prompt, format_file_contents, format_file_list,
-};
+use crate::explore::prompts::{format_file_contents, format_file_list};
 use crate::explore::walker::{walk_directory, FileEntry};
 use crate::ollama::OllamaClient;
 use crate::workflow::context::WorkflowContext;
 use crate::workflow::events::StepEvent;
-use crate::workflow::runner::Workflow;
-use crate::workflow::step::StepBuilder;
+use crate::workflow::presets;
 
 pub struct ExploreConfig {
     pub model: String,
@@ -42,7 +38,11 @@ pub struct ExplorePipeline {
 
 impl ExplorePipeline {
     pub fn new(client: Arc<dyn OllamaClient>, config: ExploreConfig) -> Self {
-        Self { client, config, events: None }
+        Self {
+            client,
+            config,
+            events: None,
+        }
     }
 
     pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
@@ -54,33 +54,27 @@ impl ExplorePipeline {
         // ── Step 1: Walk the file tree ────────────────────────────────────────
         info!("explore: walking file tree at {:?}", root);
         let root_buf = root.to_path_buf();
-        let entries: Vec<FileEntry> = tokio::task::spawn_blocking(move || walk_directory(&root_buf))
-            .await
-            .map_err(|e| TermiError::Pipeline(format!("spawn_blocking error: {e}")))??;
+        let entries: Vec<FileEntry> =
+            tokio::task::spawn_blocking(move || walk_directory(&root_buf))
+                .await
+                .map_err(|e| TermiError::Pipeline(format!("spawn_blocking error: {e}")))??;
 
         info!("explore: found {} files", entries.len());
         let file_list_str = format_file_list(&entries);
 
         // ── Step 2: LLM identifies interesting files ──────────────────────────
-        let filter_schema = json!({"type": "array", "items": {"type": "string"}});
-        let model = self.config.model.clone();
-
-        let mut filter_builder = Workflow::builder().step(
-            StepBuilder::new("filter_files")
-                .model(&model)
-                .prompt(|ctx| build_filter_prompt(ctx.get_str("file_list")))
-                .output_json_schema(filter_schema)
-                .store_as("interesting_files"),
-        );
-        if let Some(tx) = self.events.clone() {
-            filter_builder = filter_builder.with_events(tx);
-        }
-        let filter_workflow = filter_builder.build();
-
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", &file_list_str);
 
-        let ctx = filter_workflow.run(Arc::clone(&self.client), ctx).await?;
+        let mut filter_builder = presets::filter_files(&self.config.model);
+        if let Some(tx) = self.events.clone() {
+            filter_builder = filter_builder.with_events(tx);
+        }
+
+        let ctx = filter_builder
+            .build()
+            .run(Arc::clone(&self.client), ctx)
+            .await?;
 
         let interesting_paths: Vec<String> = ctx
             .get_array("interesting_files")
@@ -103,10 +97,14 @@ impl ExplorePipeline {
         let mut total_bytes = 0usize;
 
         for path_str in &interesting_paths {
-            let Some(entry) = entries.iter().find(|e| {
-                e.relative_path.to_string_lossy() == path_str.as_str()
-            }) else {
-                warn!("explore: LLM suggested '{}' which is not in the file list; skipping", path_str);
+            let Some(entry) = entries
+                .iter()
+                .find(|e| e.relative_path.to_string_lossy() == path_str.as_str())
+            else {
+                warn!(
+                    "explore: LLM suggested '{}' which is not in the file list; skipping",
+                    path_str
+                );
                 continue;
             };
 
@@ -142,22 +140,18 @@ impl ExplorePipeline {
         // ── Step 4: LLM summarizes the project ────────────────────────────────
         let contents_block = format_file_contents(&file_contents);
 
-        let mut summary_builder = Workflow::builder().step(
-            StepBuilder::new("summarize")
-                .model(&model)
-                .prompt(|ctx| build_summary_prompt(ctx.get_str("file_contents")))
-                .output_text()
-                .store_as("summary"),
-        );
-        if let Some(tx) = self.events.clone() {
-            summary_builder = summary_builder.with_events(tx);
-        }
-        let summary_workflow = summary_builder.build();
-
         let mut ctx2 = WorkflowContext::new();
         ctx2.set("file_contents", &contents_block);
 
-        let ctx2 = summary_workflow.run(Arc::clone(&self.client), ctx2).await?;
+        let mut summary_builder = presets::summarize_content(&self.config.model);
+        if let Some(tx) = self.events.clone() {
+            summary_builder = summary_builder.with_events(tx);
+        }
+
+        let ctx2 = summary_builder
+            .build()
+            .run(Arc::clone(&self.client), ctx2)
+            .await?;
 
         if let Some(tx) = &self.events {
             let _ = tx.send(StepEvent::WorkflowComplete).await;
@@ -180,15 +174,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("main.rs"), "fn main() { println!(\"hi\"); }").unwrap();
-        fs::write(root.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        fs::write(
+            root.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+        )
+        .unwrap();
         fs::write(root.join("README.md"), "# My Project\nA test project.").unwrap();
         dir
     }
 
     fn mock_with_filter(files_json: &str) -> Arc<MockOllamaClient> {
-        Arc::new(
-            MockOllamaClient::new("llama3").with_chat_response(files_json),
-        )
+        Arc::new(MockOllamaClient::new("llama3").with_chat_response(files_json))
     }
 
     #[tokio::test]
@@ -198,16 +194,29 @@ mod tests {
 
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
-            ExploreConfig { model: "llama3".into(), ..Default::default() },
+            ExploreConfig {
+                model: "llama3".into(),
+                ..Default::default()
+            },
         );
 
         let result = pipeline.run(dir.path()).await;
         assert!(result.is_ok(), "pipeline failed: {:?}", result.err());
 
         let calls = client.recorded_calls().await;
-        assert_eq!(calls.len(), 2, "expected exactly 2 LLM calls, got: {calls:?}");
-        assert!(matches!(&calls[0], MockCall::ChatStream { .. }), "call 0 should be ChatStream (filter)");
-        assert!(matches!(&calls[1], MockCall::ChatStream { .. }), "call 1 should be ChatStream (summarize)");
+        assert_eq!(
+            calls.len(),
+            2,
+            "expected exactly 2 LLM calls, got: {calls:?}"
+        );
+        assert!(
+            matches!(&calls[0], MockCall::ChatStream { .. }),
+            "call 0 should be ChatStream (filter)"
+        );
+        assert!(
+            matches!(&calls[1], MockCall::ChatStream { .. }),
+            "call 1 should be ChatStream (summarize)"
+        );
     }
 
     #[tokio::test]
@@ -217,12 +226,15 @@ mod tests {
 
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
-            ExploreConfig { model: "llama3".into(), ..Default::default() },
+            ExploreConfig {
+                model: "llama3".into(),
+                ..Default::default()
+            },
         );
 
         let result = pipeline.run(dir.path()).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TermiError::Pipeline(_)));
+        assert!(matches!(result.unwrap_err(), TermiError::StepFailed { .. }));
     }
 
     #[tokio::test]
@@ -233,12 +245,19 @@ mod tests {
 
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
-            ExploreConfig { model: "llama3".into(), ..Default::default() },
+            ExploreConfig {
+                model: "llama3".into(),
+                ..Default::default()
+            },
         );
 
         // Should not error — ghost.rs is skipped with a warning
         let result = pipeline.run(dir.path()).await;
-        assert!(result.is_ok(), "should tolerate hallucinated filenames: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should tolerate hallucinated filenames: {:?}",
+            result.err()
+        );
         // Still exactly 2 LLM calls
         assert_eq!(client.recorded_calls().await.len(), 2);
     }
@@ -251,7 +270,10 @@ mod tests {
 
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
-            ExploreConfig { model: "llama3".into(), ..Default::default() },
+            ExploreConfig {
+                model: "llama3".into(),
+                ..Default::default()
+            },
         );
 
         let result = pipeline.run(dir.path()).await;

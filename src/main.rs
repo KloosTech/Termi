@@ -24,6 +24,7 @@ mod tech_radar;
 mod tui;
 mod wizard;
 mod workflow;
+mod workflows;
 
 use std::sync::Arc;
 
