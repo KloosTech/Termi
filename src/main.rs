@@ -1,8 +1,12 @@
 mod cli;
 mod error;
 mod explore;
+mod lidarr;
+mod media;
 mod ollama;
+mod radarr;
 mod searchtor;
+mod sonarr;
 mod tui;
 mod wizard;
 mod workflow;
@@ -13,10 +17,15 @@ use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use dialoguer::{theme::ColorfulTheme, Select};
+
 use cli::{Cli, Command};
 use explore::{ExploreConfig, ExplorePipeline};
+use lidarr::LidarrPipeline;
 use ollama::{EmbeddingsRequest, MockOllamaClient, OllamaClient, RealOllamaClient};
+use radarr::RadarrPipeline;
 use searchtor::SearchtorPipeline;
+use sonarr::SonarrPipeline;
 use workflow::StepEvent;
 
 #[tokio::main]
@@ -127,6 +136,132 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", result);
             }
         }
+        Command::Sonarr {
+            query,
+            url,
+            api_key,
+        } => {
+            let query_str = query.join(" ");
+            let pipeline = SonarrPipeline::new(Arc::clone(&client), cli.model.clone());
+            let output = pipeline
+                .run(&query_str, &url, &api_key)
+                .await
+                .context("sonarr pipeline failed")?;
+
+            if output.results.is_empty() {
+                println!("No results found for \"{}\".", output.corrected_query);
+                return Ok(());
+            }
+
+            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Results for \"{}\" — select to add",
+                    output.corrected_query
+                ))
+                .items(&labels)
+                .interact_opt()
+                .context("selection failed")?;
+
+            let idx = match selection {
+                None => return Ok(()),
+                Some(i) => i,
+            };
+            let item = &output.results[idx];
+            if item.already_added {
+                println!("\"{}\" is already in Sonarr.", item.display);
+                return Ok(());
+            }
+            media::post_add_media(&url, &api_key, "/api/v3/series", &item.raw)
+                .await
+                .context("failed to add to Sonarr")?;
+            println!("✓  Added \"{}\" to Sonarr.", item.display);
+        }
+
+        Command::Radarr {
+            query,
+            url,
+            api_key,
+        } => {
+            let query_str = query.join(" ");
+            let pipeline = RadarrPipeline::new(Arc::clone(&client), cli.model.clone());
+            let output = pipeline
+                .run(&query_str, &url, &api_key)
+                .await
+                .context("radarr pipeline failed")?;
+
+            if output.results.is_empty() {
+                println!("No results found for \"{}\".", output.corrected_query);
+                return Ok(());
+            }
+
+            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Results for \"{}\" — select to add",
+                    output.corrected_query
+                ))
+                .items(&labels)
+                .interact_opt()
+                .context("selection failed")?;
+
+            let idx = match selection {
+                None => return Ok(()),
+                Some(i) => i,
+            };
+            let item = &output.results[idx];
+            if item.already_added {
+                println!("\"{}\" is already in Radarr.", item.display);
+                return Ok(());
+            }
+            media::post_add_media(&url, &api_key, "/api/v3/movie", &item.raw)
+                .await
+                .context("failed to add to Radarr")?;
+            println!("✓  Added \"{}\" to Radarr.", item.display);
+        }
+
+        Command::Lidarr {
+            query,
+            url,
+            api_key,
+        } => {
+            let query_str = query.join(" ");
+            let pipeline = LidarrPipeline::new(Arc::clone(&client), cli.model.clone());
+            let output = pipeline
+                .run(&query_str, &url, &api_key)
+                .await
+                .context("lidarr pipeline failed")?;
+
+            if output.results.is_empty() {
+                println!("No results found for \"{}\".", output.corrected_query);
+                return Ok(());
+            }
+
+            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Results for \"{}\" — select to add",
+                    output.corrected_query
+                ))
+                .items(&labels)
+                .interact_opt()
+                .context("selection failed")?;
+
+            let idx = match selection {
+                None => return Ok(()),
+                Some(i) => i,
+            };
+            let item = &output.results[idx];
+            if item.already_added {
+                println!("\"{}\" is already in Lidarr.", item.display);
+                return Ok(());
+            }
+            media::post_add_media(&url, &api_key, "/api/v1/artist", &item.raw)
+                .await
+                .context("failed to add to Lidarr")?;
+            println!("✓  Added \"{}\" to Lidarr.", item.display);
+        }
+
         Command::New { name } => {
             wizard::run(name)?;
         }
