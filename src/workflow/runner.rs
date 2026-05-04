@@ -438,7 +438,10 @@ async fn run_shell(
         tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&cmd)
-            .current_dir((shell.working_dir_fn)(&ctx))
+            .current_dir(match &shell.working_dir_fn {
+                Some(f) => f(&ctx),
+                None => ".".to_string(),
+            })
             .output(),
     )
     .await
@@ -457,14 +460,12 @@ async fn run_shell(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1);
 
-    if let Some(key) = shell.store_stdout_as {
-        ctx.set(key, &stdout);
-    }
+    ctx.set(shell.store_stdout_as, &stdout);
     if let Some(key) = shell.store_stderr_as {
         ctx.set(key, &stderr);
     }
     if let Some(key) = shell.store_exit_code_as {
-        ctx.set(key, &(exit_code as i64));
+        ctx.set(key, &exit_code);
     }
     emit_snapshot(&ctx, events).await;
 
@@ -644,7 +645,6 @@ async fn fetch_js(url: &str, _timeout_secs: u64) -> Result<String, TermiError> {
         .await
         .map_err(|e| TermiError::Pipeline(format!("Navigation to {url} failed: {e}")))?;
 
-    // Give JS time to settle after initial load.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let html = page
@@ -693,13 +693,11 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Add a shell-command step.
     pub fn shell(mut self, step: ShellStepBuilder) -> Self {
         self.nodes.push(WorkflowNode::Shell(step.finish()));
         self
     }
 
-    /// Add an HTTP-fetch step.
     pub fn http(mut self, step: HttpStepBuilder) -> Self {
         self.nodes.push(WorkflowNode::Http(step.finish()));
         self
@@ -780,6 +778,15 @@ impl WorkflowBuilder {
             primary: Box::new(WorkflowNode::Step(primary.finish())),
             fallback: Box::new(WorkflowNode::Step(fallback.finish())),
         });
+        self
+    }
+
+    pub fn step_with_fallback(self, primary: StepBuilder, fallback: StepBuilder) -> Self {
+        self.fallback(primary, fallback)
+    }
+
+    pub fn extend(mut self, other: WorkflowBuilder) -> Self {
+        self.nodes.extend(other.nodes);
         self
     }
 
@@ -1247,7 +1254,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx.get_str("o"), "Mock chat response");
-        // Verify it was indeed the 'else' branch (would need a way to distinguish mock responses or check names)
     }
 
     #[tokio::test]
