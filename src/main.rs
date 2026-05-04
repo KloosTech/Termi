@@ -1,8 +1,8 @@
 mod cli;
 mod error;
 mod explore;
-mod searchtor;
 mod ollama;
+mod searchtor;
 mod tui;
 mod wizard;
 mod workflow;
@@ -15,8 +15,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use cli::{Cli, Command};
 use explore::{ExploreConfig, ExplorePipeline};
-use searchtor::SearchtorPipeline;
 use ollama::{EmbeddingsRequest, MockOllamaClient, OllamaClient, RealOllamaClient};
+use searchtor::SearchtorPipeline;
 use workflow::StepEvent;
 
 #[tokio::main]
@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
     // The TUI takes over the terminal for the real explore path, so we only
     // initialise the tracing subscriber when it won't collide with ratatui.
     // `New` never uses the TUI; other commands do unless --mock is set.
-    let will_run_tui = matches!(cli.command, Command::Explore { .. } | Command::Searchtor { .. }) && !cli.mock;
+    let will_run_tui = matches!(
+        cli.command,
+        Command::Explore { .. } | Command::Searchtor { .. }
+    ) && !cli.mock;
     if !will_run_tui {
         fmt()
             .with_env_filter(
@@ -89,22 +92,35 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Searchtor { query, depth } => {
             let query = query.join(" ");
+            let vault_path = "/Users/jack/Library/Mobile Documents/iCloud~md~obsidian/Documents/MainVault/Personal/Knowlege";
             if cli.mock {
                 let pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
-                    .with_depth(depth);
-                let result = pipeline.run(query).await.context("searchtor pipeline failed")?;
+                    .with_depth(depth)
+                    .with_vault(vault_path);
+                let result = pipeline
+                    .run(query)
+                    .await
+                    .context("searchtor pipeline failed")?;
                 println!("\n=== Searchtor ===\n");
                 println!("{}", result);
             } else {
                 let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
                 let pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
                     .with_depth(depth)
+                    .with_vault(vault_path)
                     .with_events(tx);
 
                 let handle = tokio::spawn(async move { pipeline.run(query).await });
 
-                tui::run(rx, cli.model.clone(), "searchtor".to_string(), Arc::clone(&client), cli.debug)
-                    .await.context("TUI error")?;
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "searchtor".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
+                .await
+                .context("TUI error")?;
 
                 let result = handle.await.context("pipeline task panicked")??;
                 println!("\n=== Searchtor ===\n");

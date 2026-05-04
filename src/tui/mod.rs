@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -151,15 +151,27 @@ impl App {
                 self.stream_text.push_str(&text);
                 self.live_tokens += 1;
             }
-            StepEvent::StepCompleted { name, total_tokens, elapsed_ms } => {
-                self.completed.push(CompletedStep { name, tokens: total_tokens, elapsed_ms });
+            StepEvent::StepCompleted {
+                name,
+                total_tokens,
+                elapsed_ms,
+            } => {
+                self.completed.push(CompletedStep {
+                    name,
+                    tokens: total_tokens,
+                    elapsed_ms,
+                });
                 self.current_step = None;
                 self.current_model = None;
                 self.live_tokens = 0;
                 self.step_start = None;
             }
             StepEvent::StepSkipped { name } => {
-                self.completed.push(CompletedStep { name, tokens: 0, elapsed_ms: 0 });
+                self.completed.push(CompletedStep {
+                    name,
+                    tokens: 0,
+                    elapsed_ms: 0,
+                });
                 self.current_step = None;
             }
             StepEvent::StatusUpdate { message } => {
@@ -235,8 +247,7 @@ impl App {
                         self.ctx_detail_scroll += 1;
                     } else {
                         let max = self.ctx_entries.len().saturating_sub(1);
-                        self.ctx_selected =
-                            Some(self.ctx_selected.map_or(0, |i| (i + 1).min(max)));
+                        self.ctx_selected = Some(self.ctx_selected.map_or(0, |i| (i + 1).min(max)));
                         self.ensure_selection_visible();
                     }
                     return false;
@@ -282,9 +293,13 @@ impl App {
             }
             KeyCode::PageUp => self.summary_scroll = self.summary_scroll.saturating_sub(20),
             KeyCode::PageDown => self.summary_scroll += 20,
-            KeyCode::Backspace => { self.input.pop(); }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
             KeyCode::Esc => {
-                if self.input.is_empty() { return true; }
+                if self.input.is_empty() {
+                    return true;
+                }
                 self.input.clear();
             }
             KeyCode::Char('q') if self.input.is_empty() => return true,
@@ -305,9 +320,13 @@ impl App {
             }
             KeyCode::PageUp => self.answer_scroll = self.answer_scroll.saturating_sub(20),
             KeyCode::PageDown => self.answer_scroll += 20,
-            KeyCode::Backspace => { self.input.pop(); }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
             KeyCode::Esc => {
-                if self.input.is_empty() { return true; }
+                if self.input.is_empty() {
+                    return true;
+                }
                 self.input.clear();
             }
             KeyCode::Char('q') if self.input.is_empty() => return true,
@@ -321,11 +340,15 @@ impl App {
     // ── Mouse handler ──────────────────────────────────────────────────────
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
-        if !self.debug { return; }
+        if !self.debug {
+            return;
+        }
 
         // Context panel occupies the right 35% of the screen.
         let ctx_start_col = self.term_cols * 65 / 100;
-        if col < ctx_start_col { return; } // click is in the main workflow panel
+        if col < ctx_start_col {
+            return;
+        } // click is in the main workflow panel
 
         if self.ctx_detail {
             // Any click in the detail view collapses it back to the list.
@@ -415,19 +438,31 @@ async fn fire_question(
     }
     messages.push(Message::user(question));
 
-    let req = ChatRequest { model, messages, stream: Some(true), ..Default::default() };
+    let req = ChatRequest {
+        model,
+        messages,
+        stream: Some(true),
+        ..Default::default()
+    };
 
     match client.chat_stream(req).await {
-        Err(e) => { let _ = tx.send(AnswerChunk::Error(e.to_string())).await; }
+        Err(e) => {
+            let _ = tx.send(AnswerChunk::Error(e.to_string())).await;
+        }
         Ok(mut stream) => {
             while let Some(result) = stream.next().await {
                 match result {
-                    Err(e) => { let _ = tx.send(AnswerChunk::Error(e.to_string())).await; return; }
+                    Err(e) => {
+                        let _ = tx.send(AnswerChunk::Error(e.to_string())).await;
+                        return;
+                    }
                     Ok(chunk) => {
                         if !chunk.message.content.is_empty() {
                             let _ = tx.send(AnswerChunk::Token(chunk.message.content)).await;
                         }
-                        if chunk.done { break; }
+                        if chunk.done {
+                            break;
+                        }
                     }
                 }
             }
@@ -497,7 +532,11 @@ fn render_ctx_list(f: &mut Frame, area: Rect, app: &App) {
                 let key_str = truncate_str(key, key_w);
                 let val_str = format_ctx_value(val, val_w);
 
-                let bg = if selected { Color::DarkGray } else { Color::Reset };
+                let bg = if selected {
+                    Color::DarkGray
+                } else {
+                    Color::Reset
+                };
 
                 Line::from(vec![
                     Span::styled(selector, Style::default().fg(Color::Yellow)),
@@ -534,7 +573,9 @@ fn render_ctx_list(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_ctx_detail(f: &mut Frame, area: Rect, app: &App) {
     let Some(i) = app.ctx_selected else { return };
-    let Some((key, val)) = app.ctx_entries.get(i) else { return };
+    let Some((key, val)) = app.ctx_entries.get(i) else {
+        return;
+    };
 
     let full = format_full_value(val);
     let title = format!(" {key} ({}/{})", i + 1, app.ctx_entries.len());
@@ -586,7 +627,9 @@ fn format_ctx_value(v: &serde_json::Value, max_width: usize) -> String {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if max == 0 { return String::new(); }
+    if max == 0 {
+        return String::new();
+    }
     let count = s.chars().count();
     if count > max {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
@@ -642,7 +685,12 @@ fn render_completed_block(f: &mut Frame, area: Rect, app: &App) {
                 format!("  {:>6.1}s", s.elapsed_ms as f64 / 1000.0)
             };
             Line::from(vec![
-                Span::styled("✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "✓ ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!("{:<20}", s.name),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -683,15 +731,22 @@ fn render_stream_block(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let elapsed = app.workflow_start.elapsed().as_secs_f64();
-    let total_tokens: u32 =
-        app.completed.iter().map(|s| s.tokens).sum::<u32>() + app.live_tokens;
+    let total_tokens: u32 = app.completed.iter().map(|s| s.tokens).sum::<u32>() + app.live_tokens;
     let speed = if let Some(start) = app.step_start {
         let secs = start.elapsed().as_secs_f64();
-        if secs > 0.1 { app.live_tokens as f64 / secs } else { 0.0 }
+        if secs > 0.1 {
+            app.live_tokens as f64 / secs
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
-    let debug_hint = if app.debug { "  │  Ctrl+↑↓ nav  Ctrl+Enter expand  Ctrl+R reset" } else { "" };
+    let debug_hint = if app.debug {
+        "  │  Ctrl+↑↓ nav  Ctrl+Enter expand  Ctrl+R reset"
+    } else {
+        ""
+    };
     let text = format!(
         " Elapsed: {:.1}s  |  Tokens: {}  |  Speed: {:.1} tok/s{debug_hint} ",
         elapsed, total_tokens, speed
@@ -703,19 +758,63 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
 // ── Reading phase ─────────────────────────────────────────────────────────────
 
 fn render_reading(f: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(area);
+    if let Some(ref err) = app.error_message {
+        // Calculate how many lines the error needs so the panel is tall enough.
+        let term_w = area.width.saturating_sub(4) as usize; // inside borders + padding
+        let err_line_count = if term_w == 0 {
+            1
+        } else {
+            err.chars()
+                .collect::<Vec<_>>()
+                .chunks(term_w)
+                .count()
+                .max(1) as u16
+        };
+        let error_h = (err_line_count + 2).min(area.height / 2); // +2 for borders
 
-    let title = if let Some(ref err) = app.error_message {
-        format!(" Error: {err} ")
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(error_h),
+                Constraint::Min(3),
+                Constraint::Length(3),
+            ])
+            .split(area);
+
+        let error_para = Paragraph::new(err.as_str())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" ✗ Pipeline Error ")
+                    .border_style(Style::default().fg(Color::Red)),
+            )
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: false });
+        f.render_widget(error_para, chunks[0]);
+
+        render_scrollable_text(
+            f,
+            chunks[1],
+            " Output  (↑↓ scroll) ",
+            &app.summary_text,
+            app.summary_scroll,
+        );
+        render_input_box(f, chunks[2], app);
     } else {
-        " Summary  (↑↓ scroll) ".to_string()
-    };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .split(area);
 
-    render_scrollable_text(f, chunks[0], &title, &app.summary_text, app.summary_scroll);
-    render_input_box(f, chunks[1], app);
+        render_scrollable_text(
+            f,
+            chunks[0],
+            " Summary  (↑↓ scroll) ",
+            &app.summary_text,
+            app.summary_scroll,
+        );
+        render_input_box(f, chunks[1], app);
+    }
 }
 
 // ── Q&A phase ─────────────────────────────────────────────────────────────────
@@ -731,8 +830,11 @@ fn render_qa(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
     render_scrollable_text(
-        f, chunks[0], " Summary  (↑↓ scroll, PgUp/PgDn) ",
-        &app.summary_text, app.summary_scroll,
+        f,
+        chunks[0],
+        " Summary  (↑↓ scroll, PgUp/PgDn) ",
+        &app.summary_text,
+        app.summary_scroll,
     );
     render_answer_block(f, chunks[1], app);
     render_input_box(f, chunks[2], app);
@@ -810,12 +912,20 @@ fn render_input_box(f: &mut Frame, area: Rect, app: &App) {
 // ── Scroll helper ─────────────────────────────────────────────────────────────
 
 fn compute_scroll_offset(text: &str, width: u16, height: u16) -> u16 {
-    if width == 0 || height == 0 { return 0; }
+    if width == 0 || height == 0 {
+        return 0;
+    }
     let w = width as usize;
     let h = height as usize;
     let wrapped: usize = text
         .lines()
-        .map(|line| if line.is_empty() { 1 } else { (line.len() + w - 1) / w })
+        .map(|line| {
+            if line.is_empty() {
+                1
+            } else {
+                (line.len() + w - 1) / w
+            }
+        })
         .sum();
     (wrapped.max(1).saturating_sub(h)) as u16
 }
@@ -840,7 +950,11 @@ pub async fn run(
 
     // Always restore the terminal, even on error.
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     result

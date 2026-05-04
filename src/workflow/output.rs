@@ -24,12 +24,18 @@ impl OutputFormat {
         match self {
             OutputFormat::Text => Ok(Value::String(raw.to_string())),
 
-            OutputFormat::Json => serde_json::from_str(raw).map_err(|e| {
-                TermiError::Pipeline(format!("expected JSON output, got parse error: {e}\nRaw: {raw}"))
-            }),
+            OutputFormat::Json => {
+                let stripped = strip_code_fences(raw);
+                serde_json::from_str(stripped).map_err(|e| {
+                    TermiError::Pipeline(format!(
+                        "expected JSON output, got parse error: {e}\nRaw: {raw}"
+                    ))
+                })
+            }
 
             OutputFormat::JsonSchema(schema) => {
-                let value: Value = serde_json::from_str(raw).map_err(|e| {
+                let stripped = strip_code_fences(raw);
+                let value: Value = serde_json::from_str(stripped).map_err(|e| {
                     TermiError::Pipeline(format!(
                         "expected JSON output, got parse error: {e}\nRaw: {raw}"
                     ))
@@ -52,6 +58,29 @@ impl OutputFormat {
             OutputFormat::JsonSchema(schema) => Some(schema.clone()),
         }
     }
+}
+
+/// Strip leading/trailing markdown code fences that models frequently emit
+/// even when instructed not to. Handles both ` ```json ` and bare ` ``` `.
+fn strip_code_fences(raw: &str) -> &str {
+    let s = raw.trim();
+    // Remove opening fence line (```json, ```JSON, ``` etc.)
+    let s = if let Some(after_fence) = s.strip_prefix("```") {
+        // skip the optional language tag and the newline
+        let after_tag = after_fence
+            .find('\n')
+            .map(|i| &after_fence[i + 1..])
+            .unwrap_or(after_fence);
+        // Remove closing fence if present
+        if let Some(before_close) = after_tag.trim_end().strip_suffix("```") {
+            before_close.trim()
+        } else {
+            after_tag.trim()
+        }
+    } else {
+        s
+    };
+    s
 }
 
 /// If the schema expects an array but `value` is an object, extract the first
@@ -85,9 +114,7 @@ fn validate_schema(value: &Value, schema: &Value) -> Result<(), TermiError> {
 
     // For arrays: validate each item against items schema if present
     if expected_type == "array" {
-        if let (Some(items_schema), Some(arr)) =
-            (schema.get("items"), value.as_array())
-        {
+        if let (Some(items_schema), Some(arr)) = (schema.get("items"), value.as_array()) {
             for (i, item) in arr.iter().enumerate() {
                 validate_schema(item, items_schema).map_err(|e| {
                     TermiError::Pipeline(format!("schema validation failed at index {i}: {e}"))
@@ -98,9 +125,10 @@ fn validate_schema(value: &Value, schema: &Value) -> Result<(), TermiError> {
 
     // For objects: validate required properties if present
     if expected_type == "object" {
-        if let (Some(required), Some(obj)) =
-            (schema.get("required").and_then(|r| r.as_array()), value.as_object())
-        {
+        if let (Some(required), Some(obj)) = (
+            schema.get("required").and_then(|r| r.as_array()),
+            value.as_object(),
+        ) {
             for req_key in required {
                 if let Some(key) = req_key.as_str() {
                     if !obj.contains_key(key) {
@@ -121,7 +149,11 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
         Value::Number(n) => {
-            if n.is_f64() { "number" } else { "integer" }
+            if n.is_f64() {
+                "number"
+            } else {
+                "integer"
+            }
         }
         Value::String(_) => "string",
         Value::Array(_) => "array",
@@ -136,7 +168,9 @@ mod tests {
 
     #[test]
     fn text_format_stores_raw_string() {
-        let v = OutputFormat::Text.parse_and_validate("hello world").unwrap();
+        let v = OutputFormat::Text
+            .parse_and_validate("hello world")
+            .unwrap();
         assert_eq!(v, Value::String("hello world".to_string()));
     }
 
@@ -148,7 +182,9 @@ mod tests {
 
     #[test]
     fn json_format_rejects_invalid_json() {
-        let err = OutputFormat::Json.parse_and_validate("not json").unwrap_err();
+        let err = OutputFormat::Json
+            .parse_and_validate("not json")
+            .unwrap_err();
         assert!(matches!(err, crate::error::TermiError::Pipeline(_)));
     }
 
@@ -177,6 +213,37 @@ mod tests {
             .parse_and_validate(r#"{"key": "val"}"#)
             .unwrap_err();
         assert!(matches!(err, crate::error::TermiError::Pipeline(_)));
+    }
+
+    #[test]
+    fn json_format_strips_json_code_fence() {
+        let raw = "```json\n{\"a\":1}\n```";
+        let v = OutputFormat::Json.parse_and_validate(raw).unwrap();
+        assert_eq!(v["a"], json!(1));
+    }
+
+    #[test]
+    fn json_format_strips_bare_code_fence() {
+        let raw = "```\n{\"a\":2}\n```";
+        let v = OutputFormat::Json.parse_and_validate(raw).unwrap();
+        assert_eq!(v["a"], json!(2));
+    }
+
+    #[test]
+    fn json_schema_strips_code_fence_before_validation() {
+        let schema = json!({"type": "object", "required": ["x"]});
+        let raw = "```json\n{\"x\": \"hello\"}\n```";
+        let v = OutputFormat::JsonSchema(schema)
+            .parse_and_validate(raw)
+            .unwrap();
+        assert_eq!(v["x"], json!("hello"));
+    }
+
+    #[test]
+    fn strip_fence_no_closing_fence_still_parses() {
+        let raw = "```json\n{\"a\":3}";
+        let v = OutputFormat::Json.parse_and_validate(raw).unwrap();
+        assert_eq!(v["a"], json!(3));
     }
 
     #[test]

@@ -109,7 +109,11 @@ fn run_node<'n>(
                 Ok(ctx)
             }
 
-            WorkflowNode::Conditional { condition, if_true, if_false } => {
+            WorkflowNode::Conditional {
+                condition,
+                if_true,
+                if_false,
+            } => {
                 if condition(&ctx) {
                     run_node(if_true, client, ctx, events).await
                 } else if let Some(else_node) = if_false {
@@ -119,7 +123,11 @@ fn run_node<'n>(
                 }
             }
 
-            WorkflowNode::LoopWhile { condition, body, max_iterations } => {
+            WorkflowNode::LoopWhile {
+                condition,
+                body,
+                max_iterations,
+            } => {
                 let mut ctx = ctx;
                 let mut i = 0usize;
                 while condition(&ctx) {
@@ -272,7 +280,10 @@ async fn run_step(
     ctx.set(step.output_key, &value);
     emit_snapshot(&ctx, &events).await;
 
-    info!("✓  step \"{}\"  ({} tokens, {}ms)", step.name, token_count, elapsed_ms);
+    info!(
+        "✓  step \"{}\"  ({} tokens, {}ms)",
+        step.name, token_count, elapsed_ms
+    );
 
     if let Some(tx) = &events {
         let _ = tx
@@ -292,7 +303,9 @@ async fn run_step(
 async fn emit_snapshot(ctx: &WorkflowContext, events: &Option<mpsc::Sender<StepEvent>>) {
     if let Some(tx) = events {
         let _ = tx
-            .send(StepEvent::ContextSnapshot { entries: ctx.snapshot() })
+            .send(StepEvent::ContextSnapshot {
+                entries: ctx.snapshot(),
+            })
             .await;
     }
 }
@@ -324,13 +337,17 @@ async fn run_shell(
     info!("▶  shell \"{}\"  $ {}", shell.name, &cmd);
 
     if let Some(tx) = events {
-        let _ = tx.send(StepEvent::StepStarted {
-            name: shell.name,
-            model: "shell".to_string(),
-        }).await;
-        let _ = tx.send(StepEvent::StatusUpdate {
-            message: format!("$ {}", &cmd),
-        }).await;
+        let _ = tx
+            .send(StepEvent::StepStarted {
+                name: shell.name,
+                model: "shell".to_string(),
+            })
+            .await;
+        let _ = tx
+            .send(StepEvent::StatusUpdate {
+                message: format!("$ {}", &cmd),
+            })
+            .await;
     }
 
     let t = Instant::now();
@@ -344,12 +361,15 @@ async fn run_shell(
             .output(),
     )
     .await
-    .map_err(|_| TermiError::Pipeline(format!(
-        "shell \"{}\" timed out after {}s", shell.name, shell.timeout_secs
-    )))?
-    .map_err(|e| TermiError::Pipeline(format!(
-        "shell \"{}\" failed to launch: {}", shell.name, e
-    )))?;
+    .map_err(|_| {
+        TermiError::Pipeline(format!(
+            "shell \"{}\" timed out after {}s",
+            shell.name, shell.timeout_secs
+        ))
+    })?
+    .map_err(|e| {
+        TermiError::Pipeline(format!("shell \"{}\" failed to launch: {}", shell.name, e))
+    })?;
 
     let elapsed_ms = t.elapsed().as_millis();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -365,14 +385,19 @@ async fn run_shell(
     }
     emit_snapshot(&ctx, events).await;
 
-    info!("✓  shell \"{}\"  exit={} ({}ms)", shell.name, exit_code, elapsed_ms);
+    info!(
+        "✓  shell \"{}\"  exit={} ({}ms)",
+        shell.name, exit_code, elapsed_ms
+    );
 
     if let Some(tx) = events {
-        let _ = tx.send(StepEvent::StepCompleted {
-            name: shell.name,
-            total_tokens: 0,
-            elapsed_ms,
-        }).await;
+        let _ = tx
+            .send(StepEvent::StepCompleted {
+                name: shell.name,
+                total_tokens: 0,
+                elapsed_ms,
+            })
+            .await;
     }
 
     Ok(ctx)
@@ -399,19 +424,32 @@ async fn run_http(
     info!("▶  http \"{}\"  GET {}", step.name, &url);
 
     if let Some(tx) = events {
-        let _ = tx.send(StepEvent::StepStarted {
-            name: step.name,
-            model: "http".to_string(),
-        }).await;
-        let _ = tx.send(StepEvent::StatusUpdate {
-            message: format!("GET {}", &url),
-        }).await;
+        let _ = tx
+            .send(StepEvent::StepStarted {
+                name: step.name,
+                model: "http".to_string(),
+            })
+            .await;
+        let _ = tx
+            .send(StepEvent::StatusUpdate {
+                message: format!("GET {}", &url),
+            })
+            .await;
     }
 
     let t = Instant::now();
 
     let raw_html = match &step.js_rendering {
-        JsRendering::None => fetch_static(&url, &step.headers, step.timeout_secs, step.store_status_as, &mut ctx).await?,
+        JsRendering::None => {
+            fetch_static(
+                &url,
+                &step.headers,
+                step.timeout_secs,
+                step.store_status_as,
+                &mut ctx,
+            )
+            .await?
+        }
         JsRendering::Headless => fetch_js(&url, step.timeout_secs).await?,
     };
 
@@ -426,14 +464,21 @@ async fn run_http(
     emit_snapshot(&ctx, events).await;
 
     let elapsed_ms = t.elapsed().as_millis();
-    info!("✓  http \"{}\"  ({} chars, {}ms)", step.name, body.len(), elapsed_ms);
+    info!(
+        "✓  http \"{}\"  ({} chars, {}ms)",
+        step.name,
+        body.len(),
+        elapsed_ms
+    );
 
     if let Some(tx) = events {
-        let _ = tx.send(StepEvent::StepCompleted {
-            name: step.name,
-            total_tokens: 0,
-            elapsed_ms,
-        }).await;
+        let _ = tx
+            .send(StepEvent::StepCompleted {
+                name: step.name,
+                total_tokens: 0,
+                elapsed_ms,
+            })
+            .await;
     }
 
     Ok(ctx)
@@ -449,6 +494,7 @@ async fn fetch_static(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .user_agent("termi/0.1")
+        .http1_only()
         .build()
         .map_err(|e| TermiError::Pipeline(format!("HTTP client build failed: {e}")))?;
 
@@ -470,7 +516,9 @@ async fn fetch_static(
     }
 
     if !status.is_success() && store_status_as.is_none() {
-        return Err(TermiError::Pipeline(format!("HTTP {status_code} from {url}")));
+        return Err(TermiError::Pipeline(format!(
+            "HTTP {status_code} from {url}"
+        )));
     }
 
     response
@@ -550,7 +598,10 @@ pub struct WorkflowBuilder {
 
 impl WorkflowBuilder {
     pub fn new() -> Self {
-        Self { nodes: Vec::new(), events: None }
+        Self {
+            nodes: Vec::new(),
+            events: None,
+        }
     }
 
     pub fn step(mut self, step: StepBuilder) -> Self {
@@ -614,7 +665,10 @@ impl WorkflowBuilder {
     where
         F: Fn(&mut WorkflowContext) + Send + Sync + 'static,
     {
-        self.nodes.push(WorkflowNode::Transform { name, f: Box::new(f) });
+        self.nodes.push(WorkflowNode::Transform {
+            name,
+            f: Box::new(f),
+        });
         self
     }
 
@@ -631,7 +685,10 @@ impl WorkflowBuilder {
     }
 
     pub fn build(self) -> Workflow {
-        Workflow { nodes: self.nodes, events: self.events }
+        Workflow {
+            nodes: self.nodes,
+            events: self.events,
+        }
     }
 }
 
@@ -679,7 +736,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -714,7 +774,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -738,7 +801,10 @@ mod tests {
             .build();
 
         let result = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await;
 
         assert!(result.is_err());
@@ -766,14 +832,19 @@ mod tests {
             )
             .build();
 
-        wf.run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
-            .await
-            .unwrap();
+        wf.run(
+            Arc::clone(&client) as Arc<dyn OllamaClient>,
+            WorkflowContext::new(),
+        )
+        .await
+        .unwrap();
 
         let calls = client.recorded_calls().await;
         assert_eq!(calls.len(), 2);
         assert!(matches!(&calls[0], MockCall::ChatStream { model, .. } if model == "llama3:8b"));
-        assert!(matches!(&calls[1], MockCall::ChatStream { model, .. } if model == "mistral:latest"));
+        assert!(
+            matches!(&calls[1], MockCall::ChatStream { model, .. } if model == "mistral:latest")
+        );
     }
 
     #[tokio::test]
@@ -792,7 +863,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -816,12 +890,21 @@ mod tests {
             )
             .build();
 
-        wf.run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
-            .await
-            .unwrap();
+        wf.run(
+            Arc::clone(&client) as Arc<dyn OllamaClient>,
+            WorkflowContext::new(),
+        )
+        .await
+        .unwrap();
 
         let calls = client.recorded_calls().await;
-        assert!(matches!(&calls[0], MockCall::ChatStream { has_system: true, .. }));
+        assert!(matches!(
+            &calls[0],
+            MockCall::ChatStream {
+                has_system: true,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -838,12 +921,21 @@ mod tests {
             )
             .build();
 
-        wf.run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
-            .await
-            .unwrap();
+        wf.run(
+            Arc::clone(&client) as Arc<dyn OllamaClient>,
+            WorkflowContext::new(),
+        )
+        .await
+        .unwrap();
 
         let calls = client.recorded_calls().await;
-        assert!(matches!(&calls[0], MockCall::ChatStream { has_system: false, .. }));
+        assert!(matches!(
+            &calls[0],
+            MockCall::ChatStream {
+                has_system: false,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -862,7 +954,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -886,7 +981,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -938,7 +1036,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -948,9 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retries_exhausted_returns_error() {
-        let client = Arc::new(
-            MockOllamaClient::new("llama3").with_fail_first_n(10),
-        );
+        let client = Arc::new(MockOllamaClient::new("llama3").with_fail_first_n(10));
 
         let wf = Workflow::builder()
             .step(
@@ -964,7 +1063,10 @@ mod tests {
             .build();
 
         let result = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await;
 
         assert!(result.is_err());
@@ -987,7 +1089,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -1014,7 +1119,10 @@ mod tests {
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -1138,15 +1246,16 @@ mod tests {
                     .prompt(|ctx| format!("iter {}", ctx.get_i64("counter").unwrap_or(0)))
                     .output_text()
                     .store_as("counter")
-                    .transform_output(|_, ctx| {
-                        json!(ctx.get_i64("counter").unwrap_or(0) + 1)
-                    }),
+                    .transform_output(|_, ctx| json!(ctx.get_i64("counter").unwrap_or(0) + 1)),
                 10,
             )
             .build();
 
         let ctx = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await
             .unwrap();
 
@@ -1171,7 +1280,10 @@ mod tests {
             .build();
 
         let result = wf
-            .run(Arc::clone(&client) as Arc<dyn OllamaClient>, WorkflowContext::new())
+            .run(
+                Arc::clone(&client) as Arc<dyn OllamaClient>,
+                WorkflowContext::new(),
+            )
             .await;
 
         assert!(result.is_err());
