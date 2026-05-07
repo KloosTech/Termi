@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use tracing::warn;
+
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -18,8 +20,17 @@ impl RealOllamaClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("failed to build reqwest client");
-        Self { base_url: base_url.into(), http }
+            .unwrap_or_else(|e| {
+                warn!(
+                    "Failed to build reqwest client with custom timeout: {}. Using default client.",
+                    e
+                );
+                reqwest::Client::new()
+            });
+        Self {
+            base_url: base_url.into(),
+            http,
+        }
     }
 
     async fn check_status(&self, resp: reqwest::Response) -> Result<reqwest::Response, TermiError> {
@@ -33,15 +44,12 @@ impl RealOllamaClient {
 }
 
 /// Convert a reqwest byte stream to an async line-by-line stream.
-fn byte_stream_to_lines(
-    resp: reqwest::Response,
-) -> impl Stream<Item = Result<String, TermiError>> {
+fn byte_stream_to_lines(resp: reqwest::Response) -> impl Stream<Item = Result<String, TermiError>> {
     let byte_stream = resp
         .bytes_stream()
         .map_err(|e| std::io::Error::other(e.to_string()));
     let reader = tokio_util::io::StreamReader::new(byte_stream);
-    FramedRead::new(reader, LinesCodec::new())
-        .map_err(|e| TermiError::Stream(e.to_string()))
+    FramedRead::new(reader, LinesCodec::new()).map_err(|e| TermiError::Stream(e.to_string()))
 }
 
 #[async_trait]
@@ -75,10 +83,9 @@ impl OllamaClient for RealOllamaClient {
             match line_result {
                 Err(e) => Some(Err(e)),
                 Ok(line) if line.trim().is_empty() => None,
-                Ok(line) => Some(
-                    serde_json::from_str::<ChatStreamChunk>(&line)
-                        .map_err(TermiError::Json),
-                ),
+                Ok(line) => {
+                    Some(serde_json::from_str::<ChatStreamChunk>(&line).map_err(TermiError::Json))
+                }
             }
         });
         Ok(Box::pin(stream))
@@ -114,8 +121,7 @@ impl OllamaClient for RealOllamaClient {
                 Err(e) => Some(Err(e)),
                 Ok(line) if line.trim().is_empty() => None,
                 Ok(line) => Some(
-                    serde_json::from_str::<GenerateStreamChunk>(&line)
-                        .map_err(TermiError::Json),
+                    serde_json::from_str::<GenerateStreamChunk>(&line).map_err(TermiError::Json),
                 ),
             }
         });

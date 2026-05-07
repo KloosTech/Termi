@@ -198,13 +198,13 @@ mod tests {
     #[tokio::test]
     async fn test_filter_files_preset() {
         let client = Arc::new(
-            MockOllamaClient::new("llama3")
+            MockOllamaClient::new("gemma4:e4b")
                 .with_chat_response(r#"["src/main.rs","src/lib.rs"]"#),
         );
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", "src/main.rs\nsrc/lib.rs\nsrc/foo.rs");
 
-        let result = filter_files("llama3")
+        let result = filter_files("gemma4:e4b")
             .build()
             .run(Arc::clone(&client) as Arc<dyn OllamaClient>, ctx)
             .await
@@ -218,12 +218,12 @@ mod tests {
     #[tokio::test]
     async fn test_summarize_content_preset() {
         let client = Arc::new(
-            MockOllamaClient::new("llama3").with_chat_response("This is a great project."),
+            MockOllamaClient::new("gemma4:e4b").with_chat_response("This is a great project."),
         );
         let mut ctx = WorkflowContext::new();
         ctx.set("file_contents", "--- src/main.rs ---\nfn main() {}");
 
-        let result = summarize_content("llama3")
+        let result = summarize_content("gemma4:e4b")
             .build()
             .run(Arc::clone(&client) as Arc<dyn OllamaClient>, ctx)
             .await
@@ -253,14 +253,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_qa_preset() {
-        let client = Arc::new(
-            MockOllamaClient::new("llama3").with_chat_response("Paris."),
-        );
+        let client = Arc::new(MockOllamaClient::new("gemma4:e4b").with_chat_response("Paris."));
         let mut ctx = WorkflowContext::new();
-        ctx.set("context", "France is a country in Europe. Its capital is Paris.");
+        ctx.set(
+            "context",
+            "France is a country in Europe. Its capital is Paris.",
+        );
         ctx.set("question", "What is the capital of France?");
 
-        let result = qa("llama3")
+        let result = qa("gemma4:e4b")
             .build()
             .run(Arc::clone(&client) as Arc<dyn OllamaClient>, ctx)
             .await
@@ -272,13 +273,16 @@ mod tests {
     #[tokio::test]
     async fn test_chunk_and_summarize_preset() {
         let client = Arc::new(
-            MockOllamaClient::new("llama3")
+            MockOllamaClient::new("gemma4:e4b")
                 .with_chat_response(r#"["Summary of chunk 1.","Summary of chunk 2."]"#),
         );
         let mut ctx = WorkflowContext::new();
-        ctx.set("chunks", json!(["Long text about topic A.", "Long text about topic B."]));
+        ctx.set(
+            "chunks",
+            json!(["Long text about topic A.", "Long text about topic B."]),
+        );
 
-        let result = chunk_and_summarize("llama3")
+        let result = chunk_and_summarize("gemma4:e4b")
             .build()
             .run(Arc::clone(&client) as Arc<dyn OllamaClient>, ctx)
             .await
@@ -292,18 +296,16 @@ mod tests {
     #[tokio::test]
     async fn test_extend_composes_presets() {
         let client = Arc::new(
-            MockOllamaClient::new("llama3").with_responses([
-                r#"["src/main.rs"]"#,
-                "A great Rust project.",
-            ]),
+            MockOllamaClient::new("gemma4:e4b")
+                .with_responses([r#"["src/main.rs"]"#, "A great Rust project."]),
         );
 
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", "src/main.rs");
         ctx.set("file_contents", "--- src/main.rs ---\nfn main() {}");
 
-        let wf = filter_files("llama3")
-            .extend(summarize_content("llama3"))
+        let wf = filter_files("gemma4:e4b")
+            .extend(summarize_content("gemma4:e4b"))
             .build();
 
         let result = wf

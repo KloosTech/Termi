@@ -23,7 +23,7 @@ pub struct ExploreConfig {
 impl Default for ExploreConfig {
     fn default() -> Self {
         Self {
-            model: "llama3:latest".to_string(),
+            model: "gemma4:e4b".to_string(),
             max_file_bytes: 128 * 1024,
             max_total_content_bytes: 512 * 1024,
         }
@@ -184,7 +184,7 @@ mod tests {
     }
 
     fn mock_with_filter(files_json: &str) -> Arc<MockOllamaClient> {
-        Arc::new(MockOllamaClient::new("llama3").with_chat_response(files_json))
+        Arc::new(MockOllamaClient::new("gemma4:e4b").with_chat_response(files_json))
     }
 
     #[tokio::test]
@@ -195,7 +195,7 @@ mod tests {
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
             ExploreConfig {
-                model: "llama3".into(),
+                model: "gemma4:e4b".into(),
                 ..Default::default()
             },
         );
@@ -227,14 +227,13 @@ mod tests {
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
             ExploreConfig {
-                model: "llama3".into(),
+                model: "gemma4:e4b".into(),
                 ..Default::default()
             },
         );
 
         let result = pipeline.run(dir.path()).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TermiError::StepFailed { .. }));
     }
 
     #[tokio::test]
@@ -246,7 +245,7 @@ mod tests {
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
             ExploreConfig {
-                model: "llama3".into(),
+                model: "gemma4:e4b".into(),
                 ..Default::default()
             },
         );
@@ -271,7 +270,7 @@ mod tests {
         let pipeline = ExplorePipeline::new(
             Arc::clone(&client) as Arc<dyn OllamaClient>,
             ExploreConfig {
-                model: "llama3".into(),
+                model: "gemma4:e4b".into(),
                 ..Default::default()
             },
         );

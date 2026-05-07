@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Local;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -32,7 +29,6 @@ pub struct DeepSearchPipeline {
     model: String,
     depth: usize,
     events: Option<mpsc::Sender<StepEvent>>,
-    vault_path: Option<String>,
 }
 
 /// Keep the original name available so `main.rs` and `mod.rs` require no changes.
@@ -45,7 +41,6 @@ impl DeepSearchPipeline {
             model,
             depth: 3,
             events: None,
-            vault_path: None,
         }
     }
 
@@ -56,11 +51,6 @@ impl DeepSearchPipeline {
 
     pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
         self.events = Some(tx);
-        self
-    }
-
-    pub fn with_vault(mut self, path: impl Into<String>) -> Self {
-        self.vault_path = Some(path.into());
         self
     }
 
@@ -90,60 +80,6 @@ impl DeepSearchPipeline {
             .build()
             .run(Arc::clone(&self.client), ctx)
             .await
-    }
-
-    /// Save the final report as a markdown file in the Obsidian vault.
-    /// Failures are logged as warnings — the pipeline never errors because of this.
-    async fn save_to_vault(&self, vault_path: &str, query: &str, document: &str) {
-        let now = chrono::Local::now();
-        let date_str = now.format("%Y-%m-%d").to_string();
-
-        // Sanitise the query into a safe filename.
-        let safe_name: String = query
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == ' ' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let safe_name = if safe_name.len() > 60 {
-            safe_name.chars().take(60).collect::<String>()
-        } else {
-            safe_name
-        };
-
-        let filename = format!("{safe_name} - {date_str}.md");
-        let full_path = Path::new(vault_path).join(&filename);
-
-        let frontmatter = format!(
-            "---\ntags:\n  - research\n  - searchtor\ndate: {date_str}\nquery: \"{query}\"\n---\n\n"
-        );
-        let content = format!("{frontmatter}{document}");
-
-        match tokio::fs::create_dir_all(vault_path).await {
-            Err(e) => {
-                tracing::warn!("Could not create vault directory '{}': {e}", vault_path);
-                return;
-            }
-            Ok(_) => {}
-        }
-
-        match tokio::fs::write(&full_path, &content).await {
-            Ok(_) => {
-                info!("Report saved to vault: {}", full_path.display());
-                self.emit_status(format!("Saved to vault: {filename}"))
-                    .await;
-            }
-            Err(e) => {
-                tracing::warn!("Could not write report to '{}': {e}", full_path.display());
-            }
-        }
     }
 
     /// Query SearXNG via curl (shell out) to avoid any reqwest connectivity issues.
@@ -291,11 +227,11 @@ impl DeepSearchPipeline {
         info!("deep_search: query plan ready");
 
         // ── Phase 2: Sequential search & findings accumulation ────────────────
-        // Findings live in Rust — only the prompt string enters the WorkflowContext.
-        let mut findings: HashMap<String, String> = prompts::sections()
-            .iter()
-            .map(|(k, _)| (k.to_string(), String::new()))
-            .collect();
+        // Initialize findings keys in the context for visibility.
+        let mut ctx = ctx;
+        for (section_key, _) in prompts::sections() {
+            ctx.set(&format!("findings_{}", section_key), "");
+        }
 
         let total_sections = prompts::sections().len();
 
@@ -317,30 +253,32 @@ impl DeepSearchPipeline {
                     .fetch_and_format("http://192.168.1.54:8080", query_str)
                     .await?;
 
-                let existing = findings.get(*section_key).cloned().unwrap_or_default();
+                let findings_key = format!("findings_{}", section_key);
+                let existing = ctx.get_str(&findings_key).to_string();
                 let analysis_prompt =
                     prompts::build_analysis_prompt(section_label, query_str, &formatted, &existing);
 
-                let ctx = WorkflowContext::new().with("analysis_prompt", &analysis_prompt);
+                // Run the analysis step using the current context to maintain visibility.
                 let model = self.model.clone();
-                let ctx = self
+                ctx = ctx.with("analysis_prompt", &analysis_prompt);
+                ctx = self
                     .run_llm_step(
                         StepBuilder::new("analyze")
                             .model(model)
                             .prompt(|ctx| ctx.get_str("analysis_prompt").to_string())
                             .output_text()
-                            .store_as("analysis"),
+                            .store_as("analysis_output"),
                         ctx,
                     )
                     .await?;
 
-                let new_text = ctx.get_str("analysis").to_string();
-                findings.entry(section_key.to_string()).and_modify(|f| {
-                    if !f.is_empty() {
-                        f.push_str("\n\n---\n\n");
-                    }
-                    f.push_str(&new_text);
-                });
+                let new_text = ctx.get_str("analysis_output").to_string();
+                let mut updated_findings = existing;
+                if !updated_findings.is_empty() {
+                    updated_findings.push_str("\n\n---\n\n");
+                }
+                updated_findings.push_str(&new_text);
+                ctx.set(&findings_key, updated_findings);
             }
 
             info!("deep_search: '{}' analysis complete", section_key);
@@ -348,31 +286,27 @@ impl DeepSearchPipeline {
 
         // ── Phase 3: Section writing ──────────────────────────────────────────
         self.emit_status("Writing structured sections...").await;
-        let mut written_sections: HashMap<String, String> = HashMap::new();
 
         for (section_key, section_label) in prompts::sections() {
             self.emit_status(format!("Writing: {section_label}")).await;
 
-            let findings_text = findings.get(*section_key).cloned().unwrap_or_default();
+            let findings_key = format!("findings_{}", section_key);
+            let findings_text = ctx.get_str(&findings_key).to_string();
             let write_prompt = prompts::build_section_writing_prompt(section_label, &findings_text);
-            let ctx = WorkflowContext::new().with("write_prompt", &write_prompt);
-            let model = self.model.clone();
 
-            let ctx = self
+            let model = self.model.clone();
+            let section_key_str = section_key.to_string();
+            ctx = ctx.with("write_prompt", &write_prompt);
+            ctx = self
                 .run_llm_step(
                     StepBuilder::new("write_section")
                         .model(model)
                         .prompt(|ctx| ctx.get_str("write_prompt").to_string())
                         .output_text()
-                        .store_as("section_text"),
+                        .store_as(format!("section_{}", section_key_str)),
                     ctx,
                 )
                 .await?;
-
-            written_sections.insert(
-                section_key.to_string(),
-                ctx.get_str("section_text").to_string(),
-            );
         }
 
         // ── Phase 4: Final synthesis ──────────────────────────────────────────
@@ -380,18 +314,16 @@ impl DeepSearchPipeline {
 
         let mut all_sections = String::new();
         for (section_key, section_label) in prompts::sections() {
-            let text = written_sections
-                .get(*section_key)
-                .cloned()
-                .unwrap_or_default();
+            let section_output_key = format!("section_{}", section_key);
+            let text = ctx.get_str(&section_output_key).to_string();
             all_sections.push_str(&format!("## {section_label}\n\n{text}\n\n"));
         }
 
         let synthesis_prompt = prompts::build_synthesis_prompt(&query, &all_sections);
-        let ctx = WorkflowContext::new().with("synthesis_prompt", &synthesis_prompt);
+        ctx = ctx.with("synthesis_prompt", &synthesis_prompt);
         let model = self.model.clone();
 
-        let ctx = self
+        ctx = self
             .run_llm_step(
                 StepBuilder::new("synthesize")
                     .model(model)
@@ -403,11 +335,6 @@ impl DeepSearchPipeline {
             .await?;
 
         let document = ctx.get_str("document").to_string();
-
-        // ── Phase 5: Save to Obsidian vault ──────────────────────────────────
-        if let Some(ref vault_path) = self.vault_path {
-            self.save_to_vault(vault_path, &query, &document).await;
-        }
 
         if let Some(tx) = &self.events {
             let _ = tx.send(StepEvent::WorkflowComplete).await;

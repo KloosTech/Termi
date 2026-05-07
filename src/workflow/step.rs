@@ -20,7 +20,7 @@ pub struct Step {
     pub model: String,
     pub prompt_fn: Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>,
     pub output_format: OutputFormat,
-    pub output_key: &'static str,
+    pub output_key: std::borrow::Cow<'static, str>,
     /// Optional system message prepended before the user prompt.
     pub system_prompt: Option<String>,
     /// Inference options (temperature, max_tokens, top_p, seed).
@@ -46,7 +46,7 @@ pub struct StepBuilder {
     model: Option<String>,
     prompt_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
     output_format: OutputFormat,
-    output_key: Option<&'static str>,
+    output_key: Option<std::borrow::Cow<'static, str>>,
     system_prompt: Option<String>,
     options: ModelOptions,
     max_retries: u32,
@@ -165,8 +165,8 @@ impl StepBuilder {
     }
 
     /// Set the context key under which the parsed output will be stored.
-    pub fn store_as(mut self, key: &'static str) -> Self {
-        self.output_key = Some(key);
+    pub fn store_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.output_key = Some(key.into());
         self
     }
 

@@ -1,6 +1,7 @@
 mod auto_docs;
 mod changelog;
 mod cli;
+mod commit_gen;
 mod competitive;
 mod dead_code;
 mod dep_audit;
@@ -11,6 +12,7 @@ mod explore;
 mod gen_tests;
 mod lidarr;
 mod log_anomaly;
+mod mail;
 mod media;
 mod migration;
 mod ollama;
@@ -21,7 +23,9 @@ mod review;
 mod searchtor;
 mod sonarr;
 mod tech_radar;
+mod tts;
 mod tui;
+mod vault;
 mod wizard;
 mod workflow;
 mod workflows;
@@ -36,6 +40,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use auto_docs::AutoDocsPipeline;
 use changelog::ChangelogPipeline;
 use cli::{Cli, Command};
+use commit_gen::CommitGenPipeline;
 use competitive::CompetitivePipeline;
 use dead_code::DeadCodePipeline;
 use dep_audit::DepAuditPipeline;
@@ -45,6 +50,7 @@ use explore::{ExploreConfig, ExplorePipeline};
 use gen_tests::GenTestsPipeline;
 use lidarr::LidarrPipeline;
 use log_anomaly::LogAnomalyPipeline;
+use mail::MailPipeline;
 
 use migration::MigrationPipeline;
 use ollama::{EmbeddingsRequest, MockOllamaClient, OllamaClient, RealOllamaClient};
@@ -69,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Explore { .. }
             | Command::Searchtor { .. }
             | Command::Review { .. }
+            | Command::CommitGen
             | Command::DeadCode { .. }
             | Command::Refactor { .. }
             | Command::AutoDocs { .. }
@@ -82,6 +89,10 @@ async fn main() -> anyhow::Result<()> {
             | Command::ErrorDetective { .. }
             | Command::LogAnomaly { .. }
             | Command::DeployCheck { .. }
+            | Command::Sonarr { .. }
+            | Command::Radarr { .. }
+            | Command::Lidarr { .. }
+            | Command::Mail { .. }
     ) && !cli.mock;
 
     if !will_run_tui {
@@ -98,7 +109,47 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("using mock Ollama client");
         Arc::new(MockOllamaClient::new(&cli.model))
     } else {
-        Arc::new(RealOllamaClient::new(&cli.ollama_url))
+        // High-availability Ollama: Try the remote server first, fallback to local.
+        // Only attempt discovery if the user hasn't overridden the default local URL.
+        let remote_url = "http://192.168.1.8:11434";
+        let local_url = &cli.ollama_url;
+
+        let selected_url = if local_url == "http://localhost:11434" {
+            let discovery_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(1500))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+
+            if let Ok(resp) = discovery_client
+                .get(format!("{}/api/tags", remote_url))
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    tracing::info!("Ollama: Using remote instance at {}", remote_url);
+                    remote_url.to_string()
+                } else {
+                    tracing::info!(
+                        "Ollama: Remote at {} returned {}, falling back to {}",
+                        remote_url,
+                        resp.status(),
+                        local_url
+                    );
+                    local_url.clone()
+                }
+            } else {
+                tracing::info!(
+                    "Ollama: Remote at {} unreachable, falling back to {}",
+                    remote_url,
+                    local_url
+                );
+                local_url.clone()
+            }
+        } else {
+            local_url.clone()
+        };
+
+        Arc::new(RealOllamaClient::new(selected_url))
     };
 
     match cli.command {
@@ -108,14 +159,12 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
 
-            if cli.mock {
+            let summary = if cli.mock {
                 let pipeline = ExplorePipeline::new(Arc::clone(&client), config);
-                let summary = pipeline
+                pipeline
                     .run(&path)
                     .await
-                    .context("explore pipeline failed")?;
-                println!("\n=== Project Summary ===\n");
-                println!("{}", summary);
+                    .context("explore pipeline failed")?
             } else {
                 let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
                 let pipeline = ExplorePipeline::new(Arc::clone(&client), config).with_events(tx);
@@ -133,33 +182,42 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("TUI error")?;
 
-                let summary = handle.await.context("pipeline task panicked")??;
-                println!("\n=== Project Summary ===\n");
-                println!("{}", summary);
+                handle.await.context("pipeline task panicked")??
+            };
+
+            println!("\n=== Project Summary ===\n");
+            println!("{}", summary);
+
+            if let Some(v) = &cli.vault {
+                let title = format!("Explore - {}", path.display());
+                vault::save(v, &title, &summary, &["project-analysis", "explore"], &None).await;
+            }
+
+            if cli.audio {
+                let title = format!("Explore - {}", path.display());
+                let output = tts::output_filename(&title);
+                tts::generate(summary, output)
+                    .await
+                    .context("audio generation failed")?;
             }
         }
 
         Command::Searchtor { query, depth } => {
-            let query = query.join(" ");
-            let vault_path = "/Users/jack/Library/Mobile Documents/iCloud~md~obsidian/Documents/MainVault/Personal/Knowlege";
-            if cli.mock {
-                let pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
+            let query_str = query.join(" ");
+
+            let result = if cli.mock {
+                SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
                     .with_depth(depth)
-                    .with_vault(vault_path);
-                let result = pipeline
-                    .run(query)
+                    .run(query_str.clone())
                     .await
-                    .context("searchtor pipeline failed")?;
-                println!("\n=== Searchtor ===\n");
-                println!("{}", result);
+                    .context("searchtor pipeline failed")?
             } else {
                 let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
                 let pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
                     .with_depth(depth)
-                    .with_vault(vault_path)
                     .with_events(tx);
 
-                let handle = tokio::spawn(async move { pipeline.run(query).await });
+                let handle = tokio::spawn(async move { pipeline.run(query_str.clone()).await });
 
                 tui::run(
                     rx,
@@ -171,9 +229,28 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("TUI error")?;
 
-                let result = handle.await.context("pipeline task panicked")??;
-                println!("\n=== Searchtor ===\n");
-                println!("{}", result);
+                handle.await.context("pipeline task panicked")??
+            };
+
+            println!("\n=== Searchtor ===\n");
+            println!("{}", result);
+
+            if let Some(v) = &cli.vault {
+                vault::save(
+                    v,
+                    &query.join(" "),
+                    &result,
+                    &["research", "searchtor"],
+                    &None,
+                )
+                .await;
+            }
+
+            if cli.audio {
+                let output = tts::output_filename(&query.join(" "));
+                tts::generate(result, output)
+                    .await
+                    .context("audio generation failed")?;
             }
         }
 
@@ -183,30 +260,44 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let pipeline = SonarrPipeline::new(Arc::clone(&client), cli.model.clone());
-            let output = pipeline
-                .run(&query_str, &url, &api_key)
+            let output = if cli.mock {
+                SonarrPipeline::new(Arc::clone(&client), cli.model.clone())
+                    .run(&query_str, &url, &api_key)
+                    .await
+                    .context("sonarr pipeline failed")?
+            } else {
+                let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+                let pipeline =
+                    SonarrPipeline::new(Arc::clone(&client), cli.model.clone()).with_events(tx);
+                let (q, u, k) = (query_str.clone(), url.clone(), api_key.clone());
+                let handle = tokio::spawn(async move { pipeline.run(&q, &u, &k).await });
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "sonarr".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
                 .await
-                .context("sonarr pipeline failed")?;
+                .context("TUI error")?;
+                handle.await.context("sonarr pipeline panicked")??
+            };
 
             if output.results.is_empty() {
                 println!("No results found for \"{}\".", output.corrected_query);
                 return Ok(());
             }
-
             let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let selection = Select::with_theme(&ColorfulTheme::default())
+            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt(format!(
                     "Results for \"{}\" — select to add",
                     output.corrected_query
                 ))
                 .items(&labels)
                 .interact_opt()
-                .context("selection failed")?;
-
-            let idx = match selection {
-                None => return Ok(()),
-                Some(i) => i,
+                .context("selection failed")?
+            else {
+                return Ok(());
             };
             let item = &output.results[idx];
             if item.already_added {
@@ -225,30 +316,44 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let pipeline = RadarrPipeline::new(Arc::clone(&client), cli.model.clone());
-            let output = pipeline
-                .run(&query_str, &url, &api_key)
+            let output = if cli.mock {
+                RadarrPipeline::new(Arc::clone(&client), cli.model.clone())
+                    .run(&query_str, &url, &api_key)
+                    .await
+                    .context("radarr pipeline failed")?
+            } else {
+                let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+                let pipeline =
+                    RadarrPipeline::new(Arc::clone(&client), cli.model.clone()).with_events(tx);
+                let (q, u, k) = (query_str.clone(), url.clone(), api_key.clone());
+                let handle = tokio::spawn(async move { pipeline.run(&q, &u, &k).await });
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "radarr".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
                 .await
-                .context("radarr pipeline failed")?;
+                .context("TUI error")?;
+                handle.await.context("radarr pipeline panicked")??
+            };
 
             if output.results.is_empty() {
                 println!("No results found for \"{}\".", output.corrected_query);
                 return Ok(());
             }
-
             let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let selection = Select::with_theme(&ColorfulTheme::default())
+            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt(format!(
                     "Results for \"{}\" — select to add",
                     output.corrected_query
                 ))
                 .items(&labels)
                 .interact_opt()
-                .context("selection failed")?;
-
-            let idx = match selection {
-                None => return Ok(()),
-                Some(i) => i,
+                .context("selection failed")?
+            else {
+                return Ok(());
             };
             let item = &output.results[idx];
             if item.already_added {
@@ -267,30 +372,44 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let pipeline = LidarrPipeline::new(Arc::clone(&client), cli.model.clone());
-            let output = pipeline
-                .run(&query_str, &url, &api_key)
+            let output = if cli.mock {
+                LidarrPipeline::new(Arc::clone(&client), cli.model.clone())
+                    .run(&query_str, &url, &api_key)
+                    .await
+                    .context("lidarr pipeline failed")?
+            } else {
+                let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+                let pipeline =
+                    LidarrPipeline::new(Arc::clone(&client), cli.model.clone()).with_events(tx);
+                let (q, u, k) = (query_str.clone(), url.clone(), api_key.clone());
+                let handle = tokio::spawn(async move { pipeline.run(&q, &u, &k).await });
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "lidarr".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
                 .await
-                .context("lidarr pipeline failed")?;
+                .context("TUI error")?;
+                handle.await.context("lidarr pipeline panicked")??
+            };
 
             if output.results.is_empty() {
                 println!("No results found for \"{}\".", output.corrected_query);
                 return Ok(());
             }
-
             let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let selection = Select::with_theme(&ColorfulTheme::default())
+            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
                 .with_prompt(format!(
                     "Results for \"{}\" — select to add",
                     output.corrected_query
                 ))
                 .items(&labels)
                 .interact_opt()
-                .context("selection failed")?;
-
-            let idx = match selection {
-                None => return Ok(()),
-                Some(i) => i,
+                .context("selection failed")?
+            else {
+                return Ok(());
             };
             let item = &output.results[idx];
             if item.already_added {
@@ -331,6 +450,35 @@ async fn main() -> anyhow::Result<()> {
 
                 let result = handle.await.context("pipeline task panicked")??;
                 println!("\n=== Code Review ===\n");
+                println!("{}", result);
+            }
+        }
+
+        Command::CommitGen => {
+            if cli.mock {
+                let pipeline = CommitGenPipeline::new(Arc::clone(&client), cli.model.clone());
+                let result = pipeline.run().await.context("commit-gen pipeline failed")?;
+                println!("\n=== Commit Suggestion ===\n");
+                println!("{}", result);
+            } else {
+                let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+                let pipeline =
+                    CommitGenPipeline::new(Arc::clone(&client), cli.model.clone()).with_events(tx);
+
+                let handle = tokio::spawn(async move { pipeline.run().await });
+
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "commit-gen".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
+                .await
+                .context("TUI error")?;
+
+                let result = handle.await.context("pipeline task panicked")??;
+                println!("\n=== Commit Suggestion ===\n");
                 println!("{}", result);
             }
         }
@@ -747,6 +895,42 @@ async fn main() -> anyhow::Result<()> {
 
                 let result = handle.await.context("pipeline task panicked")??;
                 println!("\n=== Deployment Readiness ===\n");
+                println!("{}", result);
+            }
+        }
+
+        Command::Mail { limit } => {
+            let username = std::env::var("MAIL_USERNAME").context("MAIL_USERNAME env not set")?;
+            let password = std::env::var("MAIL_PASSWORD").context("MAIL_PASSWORD env not set")?;
+
+            if cli.mock {
+                let pipeline =
+                    MailPipeline::new(Arc::clone(&client), cli.model.clone(), username, password)
+                        .with_limit(limit);
+                let result = pipeline.run().await.context("mail pipeline failed")?;
+                println!("\n=== Email Briefing ===\n");
+                println!("{}", result);
+            } else {
+                let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
+                let pipeline =
+                    MailPipeline::new(Arc::clone(&client), cli.model.clone(), username, password)
+                        .with_limit(limit)
+                        .with_events(tx);
+
+                let handle = tokio::spawn(async move { pipeline.run().await });
+
+                tui::run(
+                    rx,
+                    cli.model.clone(),
+                    "mail".to_string(),
+                    Arc::clone(&client),
+                    cli.debug,
+                )
+                .await
+                .context("TUI error")?;
+
+                let result = handle.await.context("mail pipeline panicked")??;
+                println!("\n=== Email Briefing ===\n");
                 println!("{}", result);
             }
         }

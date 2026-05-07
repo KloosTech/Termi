@@ -27,6 +27,8 @@ use crate::workflow::events::StepEvent;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+mod markdown;
+
 enum AnswerChunk {
     Token(String),
     Done,
@@ -410,28 +412,67 @@ impl App {
         let client = Arc::clone(&self.client);
         let model = self.model.clone();
         let summary = self.summary_text.clone();
+        let ctx_entries = self.ctx_entries.clone();
         let conversation = self.conversation.clone();
 
         tokio::spawn(async move {
-            fire_question(client, model, summary, conversation, question, tx).await;
+            fire_question(
+                client,
+                model,
+                summary,
+                ctx_entries,
+                conversation,
+                question,
+                tx,
+            )
+            .await;
         });
     }
 }
 
 // ── LLM answer task ───────────────────────────────────────────────────────────
 
+fn build_system_prompt(summary: &str, ctx_entries: &[(String, serde_json::Value)]) -> String {
+    const MAX_PER_ENTRY: usize = 4000;
+
+    let mut sections = String::new();
+    for (key, val) in ctx_entries {
+        let text = match val {
+            serde_json::Value::String(s) => s.clone(),
+            _ => serde_json::to_string_pretty(val).unwrap_or_default(),
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let truncated: String = trimmed.chars().take(MAX_PER_ENTRY).collect();
+        sections.push_str(&format!("\n\n### {key}\n{truncated}"));
+        if trimmed.chars().count() > MAX_PER_ENTRY {
+            sections.push_str("\n[…truncated]");
+        }
+    }
+
+    if sections.is_empty() {
+        format!("You are a helpful assistant. Pipeline output:\n\n{summary}")
+    } else {
+        format!(
+            "You are a helpful assistant with full access to all outputs produced by a completed pipeline.\n\
+             Each section below is a named result stored in the pipeline context:{sections}"
+        )
+    }
+}
+
 async fn fire_question(
     client: Arc<dyn OllamaClient>,
     model: String,
     summary: String,
+    ctx_entries: Vec<(String, serde_json::Value)>,
     conversation: Vec<(String, String)>,
     question: String,
     tx: mpsc::Sender<AnswerChunk>,
 ) {
-    let mut messages = vec![Message::system(format!(
-        "You are a helpful assistant. Here is context about a software project:\n\n{}",
-        summary
-    ))];
+    let system = build_system_prompt(&summary, &ctx_entries);
+    let mut messages = vec![Message::system(system)];
     for (q, a) in &conversation {
         messages.push(Message::user(q.clone()));
         messages.push(Message::assistant(a.clone()));
@@ -875,7 +916,8 @@ fn render_answer_block(f: &mut Frame, area: Rect, app: &App) {
 // ── Shared widgets ────────────────────────────────────────────────────────────
 
 fn render_scrollable_text(f: &mut Frame, area: Rect, title: &str, text: &str, scroll: u16) {
-    let para = Paragraph::new(text)
+    let markdown_text = markdown::parse(text);
+    let para = Paragraph::new(markdown_text)
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));

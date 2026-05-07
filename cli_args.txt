@@ -1,1 +1,1 @@
---debug --model gemma4:e4b searchtor --query "local network pc game streaming for non standard aspectratios focus on 32:9"
+--debug --model gemma4:e4b searchtor --query "it freelancing project aquise" --depth 3 --audio

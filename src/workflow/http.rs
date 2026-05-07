@@ -33,10 +33,10 @@ pub struct HttpStep {
     /// Closure that returns the URL to fetch.
     pub url_fn: Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>,
     /// Context key where the response body (or converted markdown) is stored.
-    pub store_as: &'static str,
+    pub store_as: std::borrow::Cow<'static, str>,
     /// Optional context key where the HTTP status code (i64) is stored.
     /// When set, non-2xx responses are stored rather than treated as errors.
-    pub store_status_as: Option<&'static str>,
+    pub store_status_as: Option<std::borrow::Cow<'static, str>>,
     /// When `true`, convert the HTML response body to Markdown via `htmd`.
     pub strip_html: bool,
     /// JS rendering strategy (default: `None`).
@@ -54,8 +54,8 @@ pub struct HttpStep {
 pub struct HttpStepBuilder {
     name: &'static str,
     url_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
-    store_as: Option<&'static str>,
-    store_status_as: Option<&'static str>,
+    store_as: Option<std::borrow::Cow<'static, str>>,
+    store_status_as: Option<std::borrow::Cow<'static, str>>,
     strip_html: bool,
     js_rendering: JsRendering,
     timeout_secs: u64,
@@ -88,16 +88,16 @@ impl HttpStepBuilder {
     }
 
     /// Context key where the response body (or converted markdown) is stored.
-    pub fn store_as(mut self, key: &'static str) -> Self {
-        self.store_as = Some(key);
+    pub fn store_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.store_as = Some(key.into());
         self
     }
 
     /// Context key where the HTTP status code is stored as i64.
     /// When set, non-2xx responses are NOT treated as errors — the caller
     /// can inspect the code and decide.
-    pub fn store_status_as(mut self, key: &'static str) -> Self {
-        self.store_status_as = Some(key);
+    pub fn store_status_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.store_status_as = Some(key.into());
         self
     }
 
@@ -142,10 +142,16 @@ impl HttpStepBuilder {
         HttpStep {
             name: self.name,
             url_fn: self.url_fn.unwrap_or_else(|| {
-                panic!("HttpStep \"{}\": url() must be called before finish()", self.name)
+                panic!(
+                    "HttpStep \"{}\": url() must be called before finish()",
+                    self.name
+                )
             }),
             store_as: self.store_as.unwrap_or_else(|| {
-                panic!("HttpStep \"{}\": store_as() must be called before finish()", self.name)
+                panic!(
+                    "HttpStep \"{}\": store_as() must be called before finish()",
+                    self.name
+                )
             }),
             store_status_as: self.store_status_as,
             strip_html: self.strip_html,

@@ -114,8 +114,8 @@ fn run_node<'n>(
                     match result {
                         Ok(updated) => {
                             // Merge only the specific output key from the parallel branch.
-                            if let Some(v) = updated.get(step.output_key) {
-                                merged.set(step.output_key, v);
+                            if let Some(v) = updated.get(&step.output_key) {
+                                merged.set(&step.output_key, v);
                             }
                         }
                         Err(e) if *partial_ok => {
@@ -343,7 +343,7 @@ async fn run_step(
                 None => value,
             };
 
-            ctx.set(step.output_key, &value);
+            ctx.set(&step.output_key, &value);
             emit_snapshot(&ctx, &events).await;
 
             info!(
@@ -367,7 +367,7 @@ async fn run_step(
             if let Some(handler) = &step.error_handler {
                 match handler(&e, &ctx) {
                     StepErrorAction::UseDefault(val) => {
-                        ctx.set(step.output_key, &val);
+                        ctx.set(&step.output_key, &val);
                         record_error_keys(&mut ctx, step.name, &e);
                         Ok(ctx)
                     }
@@ -460,11 +460,11 @@ async fn run_shell(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1);
 
-    ctx.set(shell.store_stdout_as, &stdout);
-    if let Some(key) = shell.store_stderr_as {
+    ctx.set(&shell.store_stdout_as, &stdout);
+    if let Some(key) = &shell.store_stderr_as {
         ctx.set(key, &stderr);
     }
-    if let Some(key) = shell.store_exit_code_as {
+    if let Some(key) = &shell.store_exit_code_as {
         ctx.set(key, &exit_code);
     }
     emit_snapshot(&ctx, events).await;
@@ -529,7 +529,7 @@ async fn run_http(
                 &url,
                 &step.headers,
                 step.timeout_secs,
-                step.store_status_as,
+                step.store_status_as.as_deref(),
                 &mut ctx,
             )
             .await?
@@ -544,7 +544,7 @@ async fn run_http(
         raw_html
     };
 
-    ctx.set(step.store_as, &body);
+    ctx.set(&step.store_as, &body);
     emit_snapshot(&ctx, events).await;
 
     let elapsed_ms = t.elapsed().as_millis();
@@ -572,7 +572,7 @@ async fn fetch_static(
     url: &str,
     headers: &[(String, String)],
     timeout_secs: u64,
-    store_status_as: Option<&'static str>,
+    store_status_as: Option<&str>,
     ctx: &mut WorkflowContext,
 ) -> Result<String, TermiError> {
     let client = reqwest::Client::builder()
@@ -587,10 +587,19 @@ async fn fetch_static(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| TermiError::Pipeline(format!("HTTP request to {url} failed: {e}")))?;
+    let response = req.send().await.map_err(|e| {
+        // Walk the full error chain — reqwest's top-level message is
+        // "error sending request for url (…)" which hides the real cause.
+        // Walking gives e.g. "Connection refused (os error 111)".
+        use std::error::Error as StdError;
+        let mut detail = e.to_string();
+        let mut src: Option<&dyn StdError> = e.source();
+        while let Some(s) = src {
+            detail.push_str(&format!(": {s}"));
+            src = s.source();
+        }
+        TermiError::Pipeline(format!("HTTP request to {url} failed: {detail}"))
+    })?;
 
     let status = response.status();
     let status_code = status.as_u16() as i64;
@@ -600,8 +609,18 @@ async fn fetch_static(
     }
 
     if !status.is_success() && store_status_as.is_none() {
+        let body = response.text().await.unwrap_or_default();
+        let hint = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| body.chars().take(200).collect());
         return Err(TermiError::Pipeline(format!(
-            "HTTP {status_code} from {url}"
+            "HTTP {status_code} from {url}{}",
+            if hint.is_empty() {
+                String::new()
+            } else {
+                format!(" — {hint}")
+            }
         )));
     }
 
@@ -811,7 +830,7 @@ mod tests {
     use serde_json::json;
 
     fn make_client() -> Arc<MockOllamaClient> {
-        Arc::new(MockOllamaClient::new("llama3"))
+        Arc::new(MockOllamaClient::new("gemma4:e4b"))
     }
 
     #[tokio::test]
@@ -820,21 +839,24 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
             .step(
                 StepBuilder::new("s2")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p2".into())
                     .store_as("o2"),
             )
             .build();
 
-        wf.run(client as Arc<dyn OllamaClient>, WorkflowContext::new())
-            .await
-            .unwrap();
+        wf.run(
+            Arc::clone(&client) as Arc<dyn OllamaClient>,
+            WorkflowContext::new(),
+        )
+        .await
+        .unwrap();
 
         let calls = client.recorded_calls().await;
         assert_eq!(calls.len(), 2);
@@ -846,13 +868,13 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
             .step(
                 StepBuilder::new("s2")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|ctx| format!("prev:{}", ctx.get_str("o1")))
                     .store_as("o2"),
             )
@@ -872,7 +894,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .output_json_schema(json!({"type": "array"}))
                     .store_as("o1"),
@@ -891,7 +913,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3:8b")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
@@ -914,7 +936,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert!(matches!(
             &calls[0],
-            MockCall::ChatStream { model, .. } if model == "llama3:8b"
+            MockCall::ChatStream { model, .. } if model == "gemma4:e4b"
         ));
         assert!(matches!(
             &calls[1],
@@ -929,7 +951,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .output_json_schema(json!({"type": "array"}))
                     .store_as("o1"),
@@ -956,7 +978,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .system_prompt("be helpful")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
@@ -987,7 +1009,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
@@ -1016,7 +1038,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .skip_if(|_| true)
                     .store_as("o1"),
@@ -1040,7 +1062,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .skip_if(|_| false)
                     .store_as("o1"),
@@ -1064,7 +1086,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .skip_if(|ctx| ctx.get_bool("skip_me"))
                     .store_as("o1"),
@@ -1088,7 +1110,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .with_retries(2)
                     .store_as("o1"),
@@ -1108,12 +1130,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_retries_exhausted_returns_error() {
-        let client = Arc::new(MockOllamaClient::new("llama3").with_fail_first_n(10));
+        let client = Arc::new(MockOllamaClient::new("gemma4:e4b").with_fail_first_n(10));
 
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .with_retries(2)
                     .store_as("o1"),
@@ -1137,7 +1159,7 @@ mod tests {
         let wf = Workflow::builder()
             .step(
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1")
                     .transform_output(|val, _| {
@@ -1162,11 +1184,11 @@ mod tests {
         let wf = Workflow::builder()
             .parallel(vec![
                 StepBuilder::new("p1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
                 StepBuilder::new("p2")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p2".into())
                     .store_as("o2"),
             ])
@@ -1190,7 +1212,7 @@ mod tests {
             .if_step(
                 |ctx| ctx.get_bool("flag"),
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
@@ -1213,7 +1235,7 @@ mod tests {
             .if_step(
                 |ctx| ctx.get_bool("flag"),
                 StepBuilder::new("s1")
-                    .model("llama3")
+                    .model("gemma4:e4b")
                     .prompt(|_| "p1".into())
                     .store_as("o1"),
             )
@@ -1236,12 +1258,12 @@ mod tests {
             .if_else_step(
                 |ctx| ctx.get_bool("flag"),
                 StepBuilder::new("if")
-                    .model("l3")
-                    .prompt(|_| "if")
+                    .model("gemma4:e4b")
+                    .prompt(|_| "if".to_string())
                     .store_as("o"),
                 StepBuilder::new("else")
-                    .model("l3")
-                    .prompt(|_| "else")
+                    .model("gemma4:e4b")
+                    .prompt(|_| "else".to_string())
                     .store_as("o"),
             )
             .build();
@@ -1284,7 +1306,7 @@ mod tests {
             .loop_step(
                 |ctx| ctx.get_i64("counter").unwrap_or(0) < 3,
                 StepBuilder::new("step")
-                    .model("l3")
+                    .model("gemma4:e4b")
                     .prompt(|ctx| format!("iter {}", ctx.get_i64("counter").unwrap_or(0)))
                     .output_text()
                     .store_as("counter")
@@ -1312,8 +1334,8 @@ mod tests {
             .loop_step(
                 |_| true, // infinite loop
                 StepBuilder::new("step")
-                    .model("l3")
-                    .prompt(|_| "p")
+                    .model("gemma4:e4b")
+                    .prompt(|_| "p".to_string())
                     .store_as("o"),
                 5,
             )

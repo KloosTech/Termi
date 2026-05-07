@@ -10,16 +10,30 @@ pub struct Cli {
     pub ollama_url: String,
 
     /// Model to use for LLM calls
-    #[arg(long, env = "OLLAMA_MODEL", default_value = "llama3:latest")]
+    #[arg(
+        long,
+        env = "OLLAMA_MODEL",
+        default_value = "gemma4:e4b",
+        global = true
+    )]
     pub model: String,
 
     /// Use mock Ollama client (no network calls; for testing)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub mock: bool,
 
     /// Show a live WorkflowContext inspector on the right side of the TUI
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub debug: bool,
+
+    /// Synthesise the final report to a WAV audio file using Qwen3-TTS.
+    /// Requires: cargo run --features tts
+    #[arg(long, global = true)]
+    pub audio: bool,
+
+    /// Path to an Obsidian vault to save results (markdown)
+    #[arg(long, global = true)]
+    pub vault: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -83,12 +97,14 @@ pub enum Command {
     /// Review git changes between two refs and produce a code review
     Review {
         /// Base ref to compare against
-        #[arg(long, default_value = "main")]
+        #[arg(long, default_value = "origin/main")]
         base: String,
         /// Head ref to review
         #[arg(long, default_value = "HEAD")]
         head: String,
     },
+    /// Summarise latest git changes and suggest a commit message
+    CommitGen,
     /// Hunt for dead/unused code in a Rust project
     DeadCode {
         #[arg(value_name = "PATH", default_value = ".")]
@@ -172,6 +188,12 @@ pub enum Command {
     DeployCheck {
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
+    },
+    /// Fetch new emails from IONOS IMAP and produce an AI-powered briefing
+    Mail {
+        /// Maximum number of recent inbox messages to inspect
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
     },
     /// Scaffold a new workflow interactively
     New {

@@ -58,7 +58,7 @@ impl MockOllamaClient {
             model: model.into(),
             chat_response_text: "Mock chat response".to_string(),
             generate_response_text: "Mock generate response".to_string(),
-            model_list: vec!["llama3:latest".to_string()],
+            model_list: vec!["gemma4:e4b".to_string()],
             embedding: vec![0.1, 0.2, 0.3],
             fail_remaining: Arc::new(Mutex::new(0)),
             response_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -340,9 +340,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_chat_records_call() {
-        let mock = MockOllamaClient::new("llama3");
+        let mock = MockOllamaClient::new("gemma4:e4b");
         let req = ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::user("hello")],
             ..Default::default()
         };
@@ -357,15 +357,15 @@ mod tests {
                 model,
                 message_count: 1,
                 ..
-            } if model == "llama3"
+            } if model == "gemma4:e4b"
         ));
     }
 
     #[tokio::test]
     async fn test_mock_chat_records_has_system() {
-        let mock = MockOllamaClient::new("llama3");
+        let mock = MockOllamaClient::new("gemma4:e4b");
         let req = ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::system("be helpful"), Message::user("hi")],
             ..Default::default()
         };
@@ -382,11 +382,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_fail_first_n_then_succeed() {
-        let mock = MockOllamaClient::new("llama3")
+        let mock = MockOllamaClient::new("gemma4:e4b")
             .with_chat_response("ok")
             .with_fail_first_n(2);
         let req = ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::user("hi")],
             ..Default::default()
         };
@@ -398,9 +398,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_with_responses_queue() {
-        let mock = MockOllamaClient::new("llama3").with_responses(["first", "second", "third"]);
+        let mock = MockOllamaClient::new("gemma4:e4b").with_responses(["first", "second", "third"]);
         let make_req = || ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::user("hi")],
             ..Default::default()
         };
@@ -421,9 +421,9 @@ mod tests {
     async fn test_mock_chat_stream_records_call_and_yields_chunks() {
         use futures_util::StreamExt;
 
-        let mock = MockOllamaClient::new("llama3").with_chat_response("hello world");
+        let mock = MockOllamaClient::new("gemma4:e4b").with_chat_response("hello world");
         let req = ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::user("hi")],
             ..Default::default()
         };
@@ -441,19 +441,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_list_models_records_call() {
-        let mock = MockOllamaClient::new("llama3");
+        let mock = MockOllamaClient::new("gemma4:e4b");
         let resp = mock.list_models().await.unwrap();
         assert!(!resp.models.is_empty());
-        assert_eq!(resp.models[0].name, "llama3:latest");
+        assert_eq!(resp.models[0].name, "gemma4:e4b");
         let calls = mock.recorded_calls().await;
         assert!(matches!(calls[0], MockCall::ListModels));
     }
 
     #[tokio::test]
     async fn test_mock_embeddings_records_prompt() {
-        let mock = MockOllamaClient::new("llama3");
+        let mock = MockOllamaClient::new("gemma4:e4b");
         let req = EmbeddingsRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             prompt: "hello world".into(),
             options: None,
         };
@@ -468,17 +468,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_records_multiple_calls_in_order() {
-        let mock = MockOllamaClient::new("llama3");
+        let mock = MockOllamaClient::new("gemma4:e4b");
         mock.list_models().await.unwrap();
         mock.chat(ChatRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             messages: vec![Message::user("a")],
             ..Default::default()
         })
         .await
         .unwrap();
         mock.embeddings(EmbeddingsRequest {
-            model: "llama3".into(),
+            model: "gemma4:e4b".into(),
             prompt: "b".into(),
             options: None,
         })

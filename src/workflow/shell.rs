@@ -5,11 +5,11 @@ pub struct ShellStep {
     /// Closure that builds the shell command string from the current context.
     pub command_fn: Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>,
     /// Context key where stdout is stored.
-    pub store_stdout_as: &'static str,
+    pub store_stdout_as: std::borrow::Cow<'static, str>,
     /// Optional context key where stderr is stored.
-    pub store_stderr_as: Option<&'static str>,
+    pub store_stderr_as: Option<std::borrow::Cow<'static, str>>,
     /// Optional context key where the exit code (i64) is stored.
-    pub store_exit_code_as: Option<&'static str>,
+    pub store_exit_code_as: Option<std::borrow::Cow<'static, str>>,
     /// Optional closure that returns the working directory path.
     pub working_dir_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
     /// Maximum seconds to wait before aborting the command (default: 60).
@@ -23,9 +23,9 @@ pub struct ShellStep {
 pub struct ShellStepBuilder {
     name: &'static str,
     command_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
-    store_stdout_as: Option<&'static str>,
-    store_stderr_as: Option<&'static str>,
-    store_exit_code_as: Option<&'static str>,
+    store_stdout_as: Option<std::borrow::Cow<'static, str>>,
+    store_stderr_as: Option<std::borrow::Cow<'static, str>>,
+    store_exit_code_as: Option<std::borrow::Cow<'static, str>>,
     working_dir_fn: Option<Box<dyn Fn(&WorkflowContext) -> String + Send + Sync>>,
     timeout_secs: u64,
     skip_if: Option<Box<dyn Fn(&WorkflowContext) -> bool + Send + Sync>>,
@@ -56,20 +56,20 @@ impl ShellStepBuilder {
     }
 
     /// Context key where captured stdout is stored as a string.
-    pub fn store_stdout_as(mut self, key: &'static str) -> Self {
-        self.store_stdout_as = Some(key);
+    pub fn store_stdout_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.store_stdout_as = Some(key.into());
         self
     }
 
     /// Context key where captured stderr is stored as a string (optional).
-    pub fn store_stderr_as(mut self, key: &'static str) -> Self {
-        self.store_stderr_as = Some(key);
+    pub fn store_stderr_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.store_stderr_as = Some(key.into());
         self
     }
 
     /// Context key where the exit code is stored as an i64 (optional).
-    pub fn store_exit_code_as(mut self, key: &'static str) -> Self {
-        self.store_exit_code_as = Some(key);
+    pub fn store_exit_code_as(mut self, key: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.store_exit_code_as = Some(key.into());
         self
     }
 
@@ -101,7 +101,10 @@ impl ShellStepBuilder {
         ShellStep {
             name: self.name,
             command_fn: self.command_fn.unwrap_or_else(|| {
-                panic!("ShellStep \"{}\": command() must be called before finish()", self.name)
+                panic!(
+                    "ShellStep \"{}\": command() must be called before finish()",
+                    self.name
+                )
             }),
             store_stdout_as: self.store_stdout_as.unwrap_or_else(|| {
                 panic!(

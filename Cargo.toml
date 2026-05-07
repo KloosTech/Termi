@@ -30,9 +30,14 @@ urlencoding    = "2.1"
 chrono         = { version = "0.4" }
 dialoguer      = "0.11"
 playwright-rs  = { version = "0.12", optional = true }
+qwen3-tts      = { git = "https://github.com/TrevorS/qwen3-tts-rs", features = ["metal", "accelerate", "hub"], optional = true }
+imap           = "2"
+native-tls     = "0.2"
+mailparse      = "0.15"
 
 [features]
 js-render = ["dep:playwright-rs"]
+tts       = ["dep:qwen3-tts"]
 
 [dev-dependencies]
 tempfile = "3"
