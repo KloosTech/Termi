@@ -40,10 +40,31 @@ impl ReviewPipeline {
         let head = head.to_string();
 
         let ctx = WorkflowContext::new()
-            .with("base", &base)
+            .with("requested_base", &base)
             .with("head", &head);
 
         let ctx = b
+            .shell(
+                ShellStepBuilder::new("resolve_base")
+                    .command(|ctx| {
+                        let base = ctx.get_str("requested_base");
+                        format!(
+                            "if git rev-parse --verify \"{0}\" >/dev/null 2>&1; then echo \"{0}\"; \
+                             elif git rev-parse --verify origin/main >/dev/null 2>&1; then echo origin/main; \
+                             elif git rev-parse --verify main >/dev/null 2>&1; then echo main; \
+                             elif git rev-parse --verify origin/master >/dev/null 2>&1; then echo origin/master; \
+                             elif git rev-parse --verify master >/dev/null 2>&1; then echo master; \
+                             else echo \"{0}\"; fi",
+                            base
+                        )
+                    })
+                    .store_stdout_as("resolved_base")
+                    .timeout_secs(5),
+            )
+            .transform("clean_base", |ctx| {
+                let cleaned = ctx.get_str("resolved_base").trim().to_string();
+                ctx.set("base", cleaned);
+            })
             .shell(
                 ShellStepBuilder::new("resolve_head")
                     .command(|ctx| {
@@ -54,17 +75,19 @@ impl ReviewPipeline {
                             format!("echo {}", head)
                         }
                     })
-                    .store_stdout_as("resolved_head")
+                    .store_stdout_as("resolved_head_raw")
                     .timeout_secs(5),
             )
+            .transform("clean_head", |ctx| {
+                let cleaned = ctx.get_str("resolved_head_raw").trim().to_string();
+                ctx.set("resolved_head", cleaned);
+            })
             .shell(
                 ShellStepBuilder::new("gather_commits")
                     .command(|ctx| {
-                        format!(
-                            "git log --oneline {}..{} 2>&1 | head -100",
-                            ctx.get_str("base"),
-                            ctx.get_str("head")
-                        )
+                        let base = ctx.get_str("base");
+                        let head = ctx.get_str("head");
+                        format!("git log --oneline {}..{} 2>&1 | head -100", base, head)
                     })
                     .store_stdout_as("commit_list")
                     .timeout_secs(15),
@@ -72,11 +95,13 @@ impl ReviewPipeline {
             .shell(
                 ShellStepBuilder::new("gather_files")
                     .command(|ctx| {
-                        format!(
-                            "git diff --name-only {}..{} 2>&1",
-                            ctx.get_str("base"),
-                            ctx.get_str("head")
-                        )
+                        let base = ctx.get_str("base");
+                        let head = ctx.get_str("head");
+                        if head == "HEAD" {
+                            format!("git diff --name-only {} 2>&1", base)
+                        } else {
+                            format!("git diff --name-only {}..{} 2>&1", base, head)
+                        }
                     })
                     .store_stdout_as("files_changed")
                     .timeout_secs(10),
@@ -93,11 +118,13 @@ impl ReviewPipeline {
             .shell(
                 ShellStepBuilder::new("gather_stat")
                     .command(|ctx| {
-                        format!(
-                            "git diff --stat {}..{} 2>&1",
-                            ctx.get_str("base"),
-                            ctx.get_str("head")
-                        )
+                        let base = ctx.get_str("base");
+                        let head = ctx.get_str("head");
+                        if head == "HEAD" {
+                            format!("git diff --stat {} 2>&1", base)
+                        } else {
+                            format!("git diff --stat {}..{} 2>&1", base, head)
+                        }
                     })
                     .store_stdout_as("diff_stat")
                     .timeout_secs(15),
@@ -105,11 +132,13 @@ impl ReviewPipeline {
             .shell(
                 ShellStepBuilder::new("gather_whitespace")
                     .command(|ctx| {
-                        format!(
-                            "git diff --check {}..{} 2>&1",
-                            ctx.get_str("base"),
-                            ctx.get_str("head")
-                        )
+                        let base = ctx.get_str("base");
+                        let head = ctx.get_str("head");
+                        if head == "HEAD" {
+                            format!("git diff --check {} 2>&1", base)
+                        } else {
+                            format!("git diff --check {}..{} 2>&1", base, head)
+                        }
                     })
                     .store_stdout_as("whitespace_issues")
                     .timeout_secs(10),
@@ -122,12 +151,14 @@ impl ReviewPipeline {
             )
             .shell(
                 ShellStepBuilder::new("gather_diff")
-                    .command(move |ctx| {
-                        format!(
-                            "git diff {}..{} 2>&1 | head -3000",
-                            ctx.get_str("base"),
-                            ctx.get_str("head")
-                        )
+                    .command(|ctx| {
+                        let base = ctx.get_str("base");
+                        let head = ctx.get_str("head");
+                        if head == "HEAD" {
+                            format!("git diff {} 2>&1 | head -3000", base)
+                        } else {
+                            format!("git diff {}..{} 2>&1 | head -3000", base, head)
+                        }
                     })
                     .store_stdout_as("diff_content")
                     .timeout_secs(30),
@@ -150,7 +181,7 @@ impl ReviewPipeline {
                             type (bug|security|style|performance|logic|documentation), \
                             severity (high|medium|low), \
                             file (string), line (string), description (string), suggestion (string).",
-                            ctx.get_str("resolved_head").trim(),
+                            ctx.get_str("resolved_head"),
                             ctx.get_str("base"),
                             ctx.get_str("project_tree"),
                             ctx.get_str("files_changed"),
@@ -186,7 +217,7 @@ impl ReviewPipeline {
                             3. Critical Issues: Serious bugs or architectural flaws.\n\
                             4. Technical Debt & Suggestions: Style, documentation, and small improvements.\n\
                             5. Verdict: One of (approve / request-changes / needs-discussion).",
-                            ctx.get_str("resolved_head").trim(),
+                            ctx.get_str("resolved_head"),
                             ctx.get_str("base"),
                             ctx.get_str("project_tree"),
                             ctx.get_str("files_changed"),
