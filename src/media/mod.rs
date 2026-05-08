@@ -34,6 +34,51 @@ pub struct MediaSearchOutput {
     pub results: Vec<MediaResult>,
 }
 
+impl MediaSearchOutput {
+    /// Select a result from the list. If events are provided, it asks the TUI.
+    /// Otherwise, it uses dialoguer in the terminal.
+    pub async fn select(
+        &self,
+        events: &Option<mpsc::Sender<StepEvent>>,
+    ) -> Result<Option<usize>, crate::error::TermiError> {
+        if self.results.is_empty() {
+            return Ok(None);
+        }
+
+        let options: Vec<String> = self.results.iter().map(|r| r.display.clone()).collect();
+
+        if let Some(tx) = events {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tx.send(StepEvent::SelectRequest {
+                prompt: format!("Results for \"{}\"", self.corrected_query),
+                options,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|e| {
+                crate::error::TermiError::Pipeline(format!("Failed to send select request: {}", e))
+            })?;
+
+            let selection = reply_rx.await.map_err(|e| {
+                crate::error::TermiError::Pipeline(format!("Failed to receive select reply: {}", e))
+            })?;
+
+            Ok(selection)
+        } else {
+            use dialoguer::{theme::ColorfulTheme, Select};
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Results for \"{}\"", self.corrected_query))
+                .items(&options)
+                .interact_opt()
+                .map_err(|e| {
+                    crate::error::TermiError::Pipeline(format!("Selection failed: {}", e))
+                })?;
+
+            Ok(selection)
+        }
+    }
+}
+
 fn build_display(item: &Value, title_field: &str) -> String {
     let title = item
         .get(title_field)

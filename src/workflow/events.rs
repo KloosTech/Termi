@@ -1,5 +1,6 @@
+use tokio::sync::oneshot;
+
 /// Events emitted by the workflow engine and consumed by the TUI (or ignored).
-#[derive(Debug)]
 pub enum StepEvent {
     /// A step is about to make its first LLM streaming call.
     StepStarted { name: &'static str, model: String },
@@ -24,4 +25,62 @@ pub enum StepEvent {
     WorkflowComplete,
     /// The workflow encountered a fatal error.
     WorkflowFailed { message: String },
+    /// Request user selection from a list of options.
+    /// The TUI should display the options and send back the chosen index.
+    SelectRequest {
+        prompt: String,
+        options: Vec<String>,
+        reply: oneshot::Sender<Option<usize>>,
+    },
+}
+
+impl std::fmt::Debug for StepEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StepStarted { name, model } => f
+                .debug_struct("StepStarted")
+                .field("name", name)
+                .field("model", model)
+                .finish(),
+            Self::Token { step, text } => f
+                .debug_struct("Token")
+                .field("step", step)
+                .field("text", text)
+                .finish(),
+            Self::StepCompleted {
+                name,
+                total_tokens,
+                elapsed_ms,
+            } => f
+                .debug_struct("StepCompleted")
+                .field("name", name)
+                .field("total_tokens", total_tokens)
+                .field("elapsed_ms", elapsed_ms)
+                .finish(),
+            Self::StepSkipped { name } => {
+                f.debug_struct("StepSkipped").field("name", name).finish()
+            }
+            Self::StatusUpdate { message } => f
+                .debug_struct("StatusUpdate")
+                .field("message", message)
+                .finish(),
+            Self::ContextSnapshot { entries } => f
+                .debug_struct("ContextSnapshot")
+                .field("entries", entries)
+                .finish(),
+            Self::WorkflowComplete => f.write_str("WorkflowComplete"),
+            Self::WorkflowFailed { message } => f
+                .debug_struct("WorkflowFailed")
+                .field("message", message)
+                .finish(),
+            Self::SelectRequest {
+                prompt, options, ..
+            } => f
+                .debug_struct("SelectRequest")
+                .field("prompt", prompt)
+                .field("options", options)
+                .field("reply", &"<oneshot::Sender>")
+                .finish(),
+        }
+    }
 }

@@ -34,7 +34,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use dialoguer::{theme::ColorfulTheme, Select};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use auto_docs::AutoDocsPipeline;
@@ -260,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let output = if cli.mock {
+            let result = if cli.mock {
                 SonarrPipeline::new(Arc::clone(&client), cli.model.clone())
                     .run(&query_str, &url, &api_key)
                     .await
@@ -282,32 +281,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("TUI error")?;
                 handle.await.context("sonarr pipeline panicked")??
             };
-
-            if output.results.is_empty() {
-                println!("No results found for \"{}\".", output.corrected_query);
-                return Ok(());
-            }
-            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "Results for \"{}\" — select to add",
-                    output.corrected_query
-                ))
-                .items(&labels)
-                .interact_opt()
-                .context("selection failed")?
-            else {
-                return Ok(());
-            };
-            let item = &output.results[idx];
-            if item.already_added {
-                println!("\"{}\" is already in Sonarr.", item.display);
-                return Ok(());
-            }
-            media::post_add_media(&url, &api_key, "/api/v3/series", &item.raw)
-                .await
-                .context("failed to add to Sonarr")?;
-            println!("✓  Added \"{}\" to Sonarr.", item.display);
+            println!("{}", result);
         }
 
         Command::Radarr {
@@ -316,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let output = if cli.mock {
+            let result = if cli.mock {
                 RadarrPipeline::new(Arc::clone(&client), cli.model.clone())
                     .run(&query_str, &url, &api_key)
                     .await
@@ -338,32 +312,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("TUI error")?;
                 handle.await.context("radarr pipeline panicked")??
             };
-
-            if output.results.is_empty() {
-                println!("No results found for \"{}\".", output.corrected_query);
-                return Ok(());
-            }
-            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "Results for \"{}\" — select to add",
-                    output.corrected_query
-                ))
-                .items(&labels)
-                .interact_opt()
-                .context("selection failed")?
-            else {
-                return Ok(());
-            };
-            let item = &output.results[idx];
-            if item.already_added {
-                println!("\"{}\" is already in Radarr.", item.display);
-                return Ok(());
-            }
-            media::post_add_media(&url, &api_key, "/api/v3/movie", &item.raw)
-                .await
-                .context("failed to add to Radarr")?;
-            println!("✓  Added \"{}\" to Radarr.", item.display);
+            println!("{}", result);
         }
 
         Command::Lidarr {
@@ -372,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             api_key,
         } => {
             let query_str = query.join(" ");
-            let output = if cli.mock {
+            let result = if cli.mock {
                 LidarrPipeline::new(Arc::clone(&client), cli.model.clone())
                     .run(&query_str, &url, &api_key)
                     .await
@@ -394,32 +343,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("TUI error")?;
                 handle.await.context("lidarr pipeline panicked")??
             };
-
-            if output.results.is_empty() {
-                println!("No results found for \"{}\".", output.corrected_query);
-                return Ok(());
-            }
-            let labels: Vec<&str> = output.results.iter().map(|r| r.display.as_str()).collect();
-            let Some(idx) = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "Results for \"{}\" — select to add",
-                    output.corrected_query
-                ))
-                .items(&labels)
-                .interact_opt()
-                .context("selection failed")?
-            else {
-                return Ok(());
-            };
-            let item = &output.results[idx];
-            if item.already_added {
-                println!("\"{}\" is already in Lidarr.", item.display);
-                return Ok(());
-            }
-            media::post_add_media(&url, &api_key, "/api/v1/artist", &item.raw)
-                .await
-                .context("failed to add to Lidarr")?;
-            println!("✓  Added \"{}\" to Lidarr.", item.display);
+            println!("{}", result);
         }
 
         Command::Review { base, head } => {

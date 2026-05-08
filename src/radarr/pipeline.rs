@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::error::TermiError;
-use crate::media::{self, MediaSearchOutput, ServiceConfig};
+use crate::media::{self, ServiceConfig};
 use crate::ollama::OllamaClient;
 use crate::workflow::events::StepEvent;
 
@@ -15,7 +15,11 @@ pub struct RadarrPipeline {
 
 impl RadarrPipeline {
     pub fn new(client: Arc<dyn OllamaClient>, model: String) -> Self {
-        Self { client, model, events: None }
+        Self {
+            client,
+            model,
+            events: None,
+        }
     }
 
     pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
@@ -28,7 +32,7 @@ impl RadarrPipeline {
         query: &str,
         base_url: &str,
         api_key: &str,
-    ) -> Result<MediaSearchOutput, TermiError> {
+    ) -> Result<String, TermiError> {
         let cfg = ServiceConfig {
             name: "Radarr",
             base_url: base_url.to_string(),
@@ -37,38 +41,52 @@ impl RadarrPipeline {
             title_field: "title",
         };
 
-        let result = media::run_pipeline(
+        let output = media::run_pipeline(
             Arc::clone(&self.client),
             self.model.clone(),
             &cfg,
             query,
             self.events.clone(),
         )
-        .await;
+        .await?;
+
+        if output.results.is_empty() {
+            let msg = format!("No results found for \"{}\".", output.corrected_query);
+            if let Some(tx) = &self.events {
+                let _ = tx
+                    .send(StepEvent::StatusUpdate {
+                        message: msg.clone(),
+                    })
+                    .await;
+                let _ = tx.send(StepEvent::WorkflowComplete).await;
+            }
+            return Ok(msg);
+        }
+
+        // Ask for selection (either via TUI or console)
+        let selection = output.select(&self.events).await?;
+
+        let result_msg = if let Some(idx) = selection {
+            let item = &output.results[idx];
+            if item.already_added {
+                format!("\"{}\" is already in Radarr.", item.display)
+            } else {
+                media::post_add_media(base_url, api_key, "/api/v3/movie", &item.raw).await?;
+                format!("✓  Added \"{}\" to Radarr.", item.display)
+            }
+        } else {
+            "Selection cancelled.".to_string()
+        };
 
         if let Some(tx) = &self.events {
-            match &result {
-                Ok(o) => {
-                    let msg = if o.results.is_empty() {
-                        format!("No results found for \"{}\"", o.corrected_query)
-                    } else {
-                        format!(
-                            "Found {} result(s) for \"{}\" — press q to choose",
-                            o.results.len(),
-                            o.corrected_query
-                        )
-                    };
-                    let _ = tx.send(StepEvent::StatusUpdate { message: msg }).await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(StepEvent::WorkflowFailed { message: e.to_string() })
-                        .await;
-                }
-            }
+            let _ = tx
+                .send(StepEvent::StatusUpdate {
+                    message: result_msg.clone(),
+                })
+                .await;
             let _ = tx.send(StepEvent::WorkflowComplete).await;
         }
 
-        result
+        Ok(result_msg)
     }
 }

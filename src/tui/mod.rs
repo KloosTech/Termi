@@ -41,6 +41,7 @@ enum Phase {
     Reading,
     Answering,
     AnswerReady,
+    Selecting,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -98,6 +99,12 @@ struct App {
     /// Cached terminal size — updated each frame for mouse hit-testing.
     term_cols: u16,
     term_rows: u16,
+
+    // ── Selection phase ────────────────────────────────────────────────────
+    select_prompt: String,
+    select_options: Vec<String>,
+    select_selected: usize,
+    select_reply: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
 }
 
 impl App {
@@ -134,6 +141,10 @@ impl App {
             ctx_detail_scroll: 0,
             term_cols: 80,
             term_rows: 24,
+            select_prompt: String::new(),
+            select_options: Vec::new(),
+            select_selected: 0,
+            select_reply: None,
         }
     }
 
@@ -198,6 +209,17 @@ impl App {
             StepEvent::WorkflowFailed { message } => {
                 self.error_message = Some(message);
                 self.phase = Phase::Reading;
+            }
+            StepEvent::SelectRequest {
+                prompt,
+                options,
+                reply,
+            } => {
+                self.select_prompt = prompt;
+                self.select_options = options;
+                self.select_selected = 0;
+                self.select_reply = Some(reply);
+                self.phase = Phase::Selecting;
             }
         }
     }
@@ -282,6 +304,7 @@ impl App {
             Phase::Reading => self.handle_key_reading(code),
             Phase::Answering => matches!(code, KeyCode::Char('q') | KeyCode::Esc),
             Phase::AnswerReady => self.handle_key_answer_ready(code),
+            Phase::Selecting => self.handle_key_selecting(code),
         }
     }
 
@@ -340,6 +363,37 @@ impl App {
     }
 
     // ── Mouse handler ──────────────────────────────────────────────────────
+
+    fn handle_key_selecting(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Up => {
+                if self.select_selected > 0 {
+                    self.select_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if !self.select_options.is_empty()
+                    && self.select_selected + 1 < self.select_options.len()
+                {
+                    self.select_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(reply) = self.select_reply.take() {
+                    let _ = reply.send(Some(self.select_selected));
+                }
+                self.phase = Phase::Working;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if let Some(reply) = self.select_reply.take() {
+                    let _ = reply.send(None);
+                }
+                self.phase = Phase::Working;
+            }
+            _ => {}
+        }
+        false
+    }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
         if !self.debug {
@@ -535,6 +589,7 @@ fn render_phase(f: &mut Frame, area: Rect, app: &App) {
         Phase::Working => render_working(f, area, app),
         Phase::Reading => render_reading(f, area, app),
         Phase::Answering | Phase::AnswerReady => render_qa(f, area, app),
+        Phase::Selecting => render_selecting(f, area, app),
     }
 }
 
@@ -914,6 +969,45 @@ fn render_answer_block(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── Shared widgets ────────────────────────────────────────────────────────────
+
+fn render_selecting(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{List, ListItem};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(area);
+
+    let items: Vec<ListItem> = app
+        .select_options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let style = if i == app.select_selected {
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(opt.as_str()).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", app.select_prompt)),
+    );
+
+    f.render_widget(list, chunks[0]);
+
+    let help = Paragraph::new(" ↑/↓: Navigate • Enter: Select • q/Esc: Cancel ")
+        .block(Block::default().borders(Borders::ALL).title(" Controls "))
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(help, chunks[1]);
+}
 
 fn render_scrollable_text(f: &mut Frame, area: Rect, title: &str, text: &str, scroll: u16) {
     let markdown_text = markdown::parse(text);
