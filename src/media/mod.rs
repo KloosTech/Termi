@@ -187,7 +187,7 @@ pub async fn run_pipeline(
             ShellStepBuilder::new("search")
                 .command(|ctx| {
                     format!(
-                        "curl --silent --show-error --max-time 15 -H \"X-Api-Key: {}\" \"{}\"",
+                        "curl --fail --silent --show-error --max-time 15 -H \"X-Api-Key: {}\" \"{}\"",
                         ctx.get_str("api_key"),
                         ctx.get_str("search_url")
                     )
@@ -227,24 +227,138 @@ pub async fn run_pipeline(
     })
 }
 
+async fn curl_get_json(base_url: &str, api_key: &str, path: &str) -> Option<Value> {
+    let url = format!("{}{}", base_url, path);
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--max-time",
+            "10",
+            "-H",
+            &format!("X-Api-Key: {}", api_key),
+            &url,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
 /// POSTs a media item to a *arr add endpoint via curl.
 pub async fn post_add_media(
     base_url: &str,
     api_key: &str,
     endpoint: &str,
     body: &Value,
-) -> Result<(), TermiError> {
+) -> Result<String, TermiError> {
     // Strip stray quotes for the same reason as run_pipeline above.
     let base_url = base_url.trim_matches('"');
     let api_key = api_key.trim_matches('"');
+
+    // ── Enrich payload with defaults ───────────────────────────────────────
+    // *arr services require root folder and profiles to be set when adding.
+    // We fetch the first available one for each category if not already set.
+    let mut payload = body.clone();
+    let mut profile_name = None;
+
+    if payload.get("rootFolderPath").is_none()
+        || payload["rootFolderPath"].as_str().unwrap_or("").is_empty()
+    {
+        let path = if endpoint.contains("v1") {
+            "/api/v1/rootfolder"
+        } else {
+            "/api/v3/rootfolder"
+        };
+        if let Some(folders) = curl_get_json(base_url, api_key, path).await {
+            if let Some(folder) = folders.as_array().and_then(|a| a.first()) {
+                if let Some(p) = folder.get("path") {
+                    payload["rootFolderPath"] = p.clone();
+                }
+            }
+        }
+    }
+
+    let qp_path = if endpoint.contains("v1") {
+        "/api/v1/qualityprofile"
+    } else {
+        "/api/v3/qualityprofile"
+    };
+
+    if let Some(profiles) = curl_get_json(base_url, api_key, qp_path).await {
+        let profile_list = profiles.as_array();
+
+        if let Some(id_val) = payload.get("qualityProfileId") {
+            // Try to find the name for the existing ID
+            if let Some(list) = profile_list {
+                profile_name = list
+                    .iter()
+                    .find(|p| p.get("id") == Some(id_val))
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+        }
+
+        // If still no ID or name, pick the first one
+        if payload.get("qualityProfileId").is_none()
+            || profile_name.is_none()
+            || payload["qualityProfileId"].as_i64().unwrap_or(0) == 0
+        {
+            if let Some(p) = profile_list.and_then(|list| list.first()) {
+                if let Some(id) = p.get("id") {
+                    payload["qualityProfileId"] = id.clone();
+                    profile_name = p.get("name").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        }
+    }
+
+    // Lidarr specific metadata profile
+    if endpoint.contains("artist") {
+        if let Some(profiles) = curl_get_json(base_url, api_key, "/api/v1/metadataprofile").await {
+            let current_id = payload
+                .get("metadataProfileId")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+
+            if current_id == 0 {
+                if let Some(id) = profiles
+                    .as_array()
+                    .and_then(|list| list.first())
+                    .and_then(|p| p.get("id"))
+                {
+                    payload["metadataProfileId"] = id.clone();
+                }
+            }
+        }
+
+        // Ensure Lidarr specific options
+        payload["addOptions"] = serde_json::json!({
+            "searchForMissingAlbums": true
+        });
+        if payload.get("artistType").is_none() {
+            payload["artistType"] = Value::String("group".to_string());
+        }
+    }
+
+    // Force monitored to true so it actually works
+    payload["monitored"] = Value::Bool(true);
+
     let url = format!("{}{}", base_url, endpoint);
-    let body_json = serde_json::to_string(body)
+    let body_json = serde_json::to_string(&payload)
         .map_err(|e| TermiError::Pipeline(format!("Failed to serialize media item: {}", e)))?;
 
     let output = Command::new("curl")
         .args([
             "--silent",
             "--show-error",
+            "-w",
+            "\n%{http_code}",
             "--max-time",
             "15",
             "--request",
@@ -259,30 +373,76 @@ pub async fn post_add_media(
         ])
         .output()
         .await
-        .map_err(|e| TermiError::Pipeline(format!("curl POST failed to launch: {}", e)))?;
+        .map_err(|e| {
+            TermiError::Pipeline(format!("curl POST to {} failed to launch: {}", url, e))
+        })?;
 
-    if output.status.success() {
-        return Ok(());
+    let full_output = String::from_utf8_lossy(&output.stdout);
+    let mut out_parts = full_output.rsplitn(2, '\n');
+    let http_status_str = out_parts.next().unwrap_or("0").trim();
+    let stdout_raw = out_parts.next().unwrap_or("");
+    let http_status: u16 = http_status_str.parse().unwrap_or(0);
+
+    if output.status.success() && (200..300).contains(&http_status) {
+        let root = payload
+            .get("rootFolderPath")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let profile = profile_name.as_deref().unwrap_or("default");
+        let monitored = payload
+            .get("monitored")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        return Ok(format!(
+            "Config: Folder={}, Profile={}, Monitored={}",
+            root,
+            profile,
+            if monitored { "Yes" } else { "No" }
+        ));
     }
 
-    let status_code = output.status.code().unwrap_or(-1);
+    let status_code = if http_status > 0 {
+        http_status as i32
+    } else {
+        output.status.code().unwrap_or(-1)
+    };
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Try to parse message from body if it's JSON
-    let msg = serde_json::from_str::<Value>(&stdout)
+    let msg = serde_json::from_str::<Value>(stdout_raw)
         .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+        .and_then(|v| {
+            if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+                Some(m.to_string())
+            } else if let Some(errors) = v.as_array() {
+                let err_msgs: Vec<_> = errors
+                    .iter()
+                    .filter_map(|e| {
+                        e.get("errorMessage")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| e.get("message").and_then(|v| v.as_str()))
+                    })
+                    .collect();
+                if !err_msgs.is_empty() {
+                    Some(err_msgs.join(", "))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| {
             if !stderr.is_empty() {
                 stderr.trim().to_string()
             } else {
-                stdout.trim().to_string()
+                stdout_raw.trim().to_string()
             }
         });
 
     Err(TermiError::Pipeline(format!(
-        "POST {} failed (exit code {}): {}",
+        "POST to {} failed (exit code {}). Details: {}",
         url, status_code, msg
     )))
 }

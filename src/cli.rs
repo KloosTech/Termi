@@ -88,10 +88,18 @@ pub enum Command {
         #[arg(long = "query", num_args = 1..)]
         query: Vec<String>,
         /// Lidarr base URL
-        #[arg(long = "url", env = "LIDARR_URL")]
+        #[arg(
+            long = "url",
+            env = "LIDARR_URL",
+            default_value = "http://192.168.1.54:8686"
+        )]
         url: String,
         /// Lidarr API key
-        #[arg(long = "api-key", env = "LIDARR_API_KEY")]
+        #[arg(
+            long = "api-key",
+            env = "LIDARR_API_KEY",
+            default_value = "9a02699fc04c4226b18b4e4eb118343b"
+        )]
         api_key: String,
     },
     /// Review git changes between two refs and produce a code review
