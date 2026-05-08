@@ -202,8 +202,12 @@ impl App {
                     }
                 }
             }
-            StepEvent::WorkflowComplete => {
-                self.summary_text = std::mem::take(&mut self.stream_text);
+            StepEvent::WorkflowComplete(summary) => {
+                if let Some(s) = summary {
+                    self.summary_text = s;
+                } else {
+                    self.summary_text = std::mem::take(&mut self.stream_text);
+                }
                 self.phase = Phase::Reading;
             }
             StepEvent::WorkflowFailed { message } => {

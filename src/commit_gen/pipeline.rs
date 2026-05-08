@@ -95,7 +95,7 @@ impl CommitGenPipeline {
             .await?;
 
         if let Some(tx) = &self.events {
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx.send(StepEvent::WorkflowComplete(None)).await;
         }
 
         let result = format!(

@@ -58,7 +58,9 @@ impl SonarrPipeline {
                         message: msg.clone(),
                     })
                     .await;
-                let _ = tx.send(StepEvent::WorkflowComplete).await;
+                let _ = tx
+                    .send(StepEvent::WorkflowComplete(Some(msg.clone())))
+                    .await;
             }
             return Ok(msg);
         }
@@ -71,6 +73,13 @@ impl SonarrPipeline {
             if item.already_added {
                 format!("\"{}\" is already in Sonarr.", item.display)
             } else {
+                if let Some(tx) = &self.events {
+                    let _ = tx
+                        .send(StepEvent::StatusUpdate {
+                            message: format!("Adding \"{}\" to Sonarr...", item.display),
+                        })
+                        .await;
+                }
                 media::post_add_media(base_url, api_key, "/api/v3/series", &item.raw).await?;
                 format!("✓  Added \"{}\" to Sonarr.", item.display)
             }
@@ -84,7 +93,9 @@ impl SonarrPipeline {
                     message: result_msg.clone(),
                 })
                 .await;
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx
+                .send(StepEvent::WorkflowComplete(Some(result_msg.clone())))
+                .await;
         }
 
         Ok(result_msg)

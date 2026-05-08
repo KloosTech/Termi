@@ -21,8 +21,9 @@ pub enum StepEvent {
     ContextSnapshot {
         entries: Vec<(String, serde_json::Value)>,
     },
-    /// All workflow nodes have completed.
-    WorkflowComplete,
+    /// All workflow nodes have completed. Optionally includes a summary
+    /// string to display in the TUI's Reading phase.
+    WorkflowComplete(Option<String>),
     /// The workflow encountered a fatal error.
     WorkflowFailed { message: String },
     /// Request user selection from a list of options.
@@ -68,7 +69,9 @@ impl std::fmt::Debug for StepEvent {
                 .debug_struct("ContextSnapshot")
                 .field("entries", entries)
                 .finish(),
-            Self::WorkflowComplete => f.write_str("WorkflowComplete"),
+            Self::WorkflowComplete(summary) => {
+                f.debug_tuple("WorkflowComplete").field(summary).finish()
+            }
             Self::WorkflowFailed { message } => f
                 .debug_struct("WorkflowFailed")
                 .field("message", message)

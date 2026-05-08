@@ -154,7 +154,7 @@ impl ExplorePipeline {
             .await?;
 
         if let Some(tx) = &self.events {
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx.send(StepEvent::WorkflowComplete(None)).await;
         }
 
         Ok(ctx2.get_str("summary").to_string())

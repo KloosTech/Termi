@@ -60,7 +60,7 @@ impl MailPipeline {
         let emails = fetcher.fetch_new(seen_ids, self.limit).await?;
 
         if emails.is_empty() {
-            self.emit(StepEvent::WorkflowComplete).await;
+            self.emit(StepEvent::WorkflowComplete(None)).await;
             return Ok("No new emails since last run.".to_string());
         }
 
@@ -169,7 +169,7 @@ impl MailPipeline {
             .run(Arc::clone(&self.client), ctx)
             .await?;
 
-        self.emit(StepEvent::WorkflowComplete).await;
+        self.emit(StepEvent::WorkflowComplete(None)).await;
 
         Ok(ctx.get_str("report").to_string())
     }

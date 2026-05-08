@@ -337,7 +337,7 @@ impl DeepSearchPipeline {
         let document = ctx.get_str("document").to_string();
 
         if let Some(tx) = &self.events {
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx.send(StepEvent::WorkflowComplete(None)).await;
         }
 
         info!("deep_search: complete for '{}'", query);

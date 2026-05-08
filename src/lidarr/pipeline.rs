@@ -58,7 +58,9 @@ impl LidarrPipeline {
                         message: msg.clone(),
                     })
                     .await;
-                let _ = tx.send(StepEvent::WorkflowComplete).await;
+                let _ = tx
+                    .send(StepEvent::WorkflowComplete(Some(msg.clone())))
+                    .await;
             }
             return Ok(msg);
         }
@@ -71,6 +73,13 @@ impl LidarrPipeline {
             if item.already_added {
                 format!("\"{}\" is already in Lidarr.", item.display)
             } else {
+                if let Some(tx) = &self.events {
+                    let _ = tx
+                        .send(StepEvent::StatusUpdate {
+                            message: format!("Adding \"{}\" to Lidarr...", item.display),
+                        })
+                        .await;
+                }
                 media::post_add_media(base_url, api_key, "/api/v1/artist", &item.raw).await?;
                 format!("✓  Added \"{}\" to Lidarr.", item.display)
             }
@@ -84,7 +93,9 @@ impl LidarrPipeline {
                     message: result_msg.clone(),
                 })
                 .await;
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx
+                .send(StepEvent::WorkflowComplete(Some(result_msg.clone())))
+                .await;
         }
 
         Ok(result_msg)

@@ -130,7 +130,7 @@ impl DepAuditPipeline {
             .await?;
 
         if let Some(tx) = &self.events {
-            let _ = tx.send(StepEvent::WorkflowComplete).await;
+            let _ = tx.send(StepEvent::WorkflowComplete(None)).await;
         }
 
         Ok(ctx.get_str("audit_report").to_string())

@@ -355,7 +355,7 @@ fn gen_pipeline_rs(cfg: &WizardConfig) -> String {
 
     // ── WorkflowComplete + return ──────────────────────────────────────────
     writeln!(o, "        if let Some(tx) = &self.events {{").unwrap();
-    writeln!(o, "            let _ = tx.send(StepEvent::WorkflowComplete).await;").unwrap();
+    writeln!(o, "            let _ = tx.send(StepEvent::WorkflowComplete(None)).await;").unwrap();
     writeln!(o, "        }}\n").unwrap();
     writeln!(o, "        Ok(ctx.get_str(\"{result_key}\").to_string())").unwrap();
     writeln!(o, "    }}").unwrap();
