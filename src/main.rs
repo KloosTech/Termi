@@ -205,16 +205,23 @@ async fn main() -> anyhow::Result<()> {
             let query_str = query.join(" ");
 
             let result = if cli.mock {
-                SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
-                    .with_depth(depth)
+                let mut pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
+                    .with_depth(depth);
+                if let Some(ref v) = cli.vault {
+                    pipeline = pipeline.with_vault(v);
+                }
+                pipeline
                     .run(query_str.clone())
                     .await
                     .context("searchtor pipeline failed")?
             } else {
                 let (tx, rx) = tokio::sync::mpsc::channel::<StepEvent>(1024);
-                let pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
+                let mut pipeline = SearchtorPipeline::new(Arc::clone(&client), cli.model.clone())
                     .with_depth(depth)
                     .with_events(tx);
+                if let Some(ref v) = cli.vault {
+                    pipeline = pipeline.with_vault(v);
+                }
 
                 let handle = tokio::spawn(async move { pipeline.run(query_str.clone()).await });
 

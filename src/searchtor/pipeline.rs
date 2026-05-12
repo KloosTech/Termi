@@ -29,6 +29,7 @@ pub struct DeepSearchPipeline {
     model: String,
     depth: usize,
     events: Option<mpsc::Sender<StepEvent>>,
+    vault_path: Option<String>,
 }
 
 /// Keep the original name available so `main.rs` and `mod.rs` require no changes.
@@ -41,6 +42,7 @@ impl DeepSearchPipeline {
             model,
             depth: 3,
             events: None,
+            vault_path: None,
         }
     }
 
@@ -51,6 +53,11 @@ impl DeepSearchPipeline {
 
     pub fn with_events(mut self, tx: mpsc::Sender<StepEvent>) -> Self {
         self.events = Some(tx);
+        self
+    }
+
+    pub fn with_vault(mut self, path: impl Into<String>) -> Self {
+        self.vault_path = Some(path.into());
         self
     }
 
@@ -162,7 +169,9 @@ impl DeepSearchPipeline {
 
     pub async fn run(&self, query: String) -> Result<String, TermiError> {
         info!("deep_search: starting for '{}'", query);
-        let result = self.run_inner(query).await;
+        let mut ctx = WorkflowContext::new();
+        let result = self.run_inner(query.clone(), &mut ctx).await;
+
         if let Err(ref e) = result {
             if let Some(tx) = &self.events {
                 let _ = tx
@@ -171,11 +180,51 @@ impl DeepSearchPipeline {
                     })
                     .await;
             }
+
+            if let Some(ref vault_path) = self.vault_path {
+                self.emit_status("Pipeline failed. Saving partial findings to vault...")
+                    .await;
+                self.emergency_save(vault_path, &query, &ctx).await;
+            }
         }
         result
     }
 
-    async fn run_inner(&self, query: String) -> Result<String, TermiError> {
+    async fn emergency_save(&self, vault_path: &str, query: &str, ctx: &WorkflowContext) {
+        let mut body = String::from("# Research Backup (Incomplete)\n\n");
+        body.push_str("The research pipeline failed. This is an automated dump of the accumulated findings.\n\n");
+
+        for (section_key, section_label) in prompts::sections() {
+            let findings_key = format!("findings_{}", section_key);
+            let findings = ctx.get_str(&findings_key);
+            if !findings.is_empty() {
+                body.push_str(&format!("## {section_label} Findings\n\n{findings}\n\n"));
+            }
+
+            let section_key_str = section_key.to_string();
+            let section_output_key = format!("section_{}", section_key_str);
+            let written = ctx.get_str(&section_output_key);
+            if !written.is_empty() {
+                body.push_str(&format!("## {section_label} Draft\n\n{written}\n\n"));
+            }
+        }
+
+        let title = format!("FAILED - {}", query);
+        crate::vault::save(
+            vault_path,
+            &title,
+            &body,
+            &["research", "error-recovery"],
+            &self.events,
+        )
+        .await;
+    }
+
+    async fn run_inner(
+        &self,
+        query: String,
+        ctx: &mut WorkflowContext,
+    ) -> Result<String, TermiError> {
         info!("deep_search: run_inner for '{}'", query);
 
         // ── Phase 1: Query generation ─────────────────────────────────────────
@@ -203,19 +252,21 @@ impl DeepSearchPipeline {
         });
 
         let gen_prompt = prompts::build_query_generation_prompt(&query, self.depth);
-        let ctx = WorkflowContext::new().with("gen_prompt", &gen_prompt);
+        ctx.set("gen_prompt", &gen_prompt);
         let model = self.model.clone();
 
-        let ctx = self
+        let updated_ctx = self
             .run_llm_step(
                 StepBuilder::new("generate_queries")
                     .model(model)
                     .prompt(|ctx| ctx.get_str("gen_prompt").to_string())
                     .output_json_schema(schema)
+                    .with_retries(3)
                     .store_as("queries"),
-                ctx,
+                ctx.clone(),
             )
             .await?;
+        *ctx = updated_ctx;
 
         let queries_val = ctx
             .get("queries")
@@ -228,7 +279,6 @@ impl DeepSearchPipeline {
 
         // ── Phase 2: Sequential search & findings accumulation ────────────────
         // Initialize findings keys in the context for visibility.
-        let mut ctx = ctx;
         for (section_key, _) in prompts::sections() {
             ctx.set(&format!("findings_{}", section_key), "");
         }
@@ -260,17 +310,19 @@ impl DeepSearchPipeline {
 
                 // Run the analysis step using the current context to maintain visibility.
                 let model = self.model.clone();
-                ctx = ctx.with("analysis_prompt", &analysis_prompt);
-                ctx = self
+                ctx.set("analysis_prompt", &analysis_prompt);
+                let updated_ctx = self
                     .run_llm_step(
                         StepBuilder::new("analyze")
                             .model(model)
                             .prompt(|ctx| ctx.get_str("analysis_prompt").to_string())
                             .output_text()
+                            .with_retries(3)
                             .store_as("analysis_output"),
-                        ctx,
+                        ctx.clone(),
                     )
                     .await?;
+                *ctx = updated_ctx;
 
                 let new_text = ctx.get_str("analysis_output").to_string();
                 let mut updated_findings = existing;
@@ -296,17 +348,19 @@ impl DeepSearchPipeline {
 
             let model = self.model.clone();
             let section_key_str = section_key.to_string();
-            ctx = ctx.with("write_prompt", &write_prompt);
-            ctx = self
+            ctx.set("write_prompt", &write_prompt);
+            let updated_ctx = self
                 .run_llm_step(
                     StepBuilder::new("write_section")
                         .model(model)
                         .prompt(|ctx| ctx.get_str("write_prompt").to_string())
                         .output_text()
+                        .with_retries(3)
                         .store_as(format!("section_{}", section_key_str)),
-                    ctx,
+                    ctx.clone(),
                 )
                 .await?;
+            *ctx = updated_ctx;
         }
 
         // ── Phase 4: Final synthesis ──────────────────────────────────────────
@@ -320,19 +374,21 @@ impl DeepSearchPipeline {
         }
 
         let synthesis_prompt = prompts::build_synthesis_prompt(&query, &all_sections);
-        ctx = ctx.with("synthesis_prompt", &synthesis_prompt);
+        ctx.set("synthesis_prompt", &synthesis_prompt);
         let model = self.model.clone();
 
-        ctx = self
+        let updated_ctx = self
             .run_llm_step(
                 StepBuilder::new("synthesize")
                     .model(model)
                     .prompt(|ctx| ctx.get_str("synthesis_prompt").to_string())
                     .output_text()
+                    .with_retries(3)
                     .store_as("document"),
-                ctx,
+                ctx.clone(),
             )
             .await?;
+        *ctx = updated_ctx;
 
         let document = ctx.get_str("document").to_string();
 
