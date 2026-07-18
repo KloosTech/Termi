@@ -1043,7 +1043,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctx.get_str("out"), "final ");
+        assert_eq!(ctx.get_str("out"), "final");
         assert_eq!(client.recorded_calls().await.len(), 3); // 2 failures + 1 success
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctx.get_str("out"), "fallback ok ");
+        assert_eq!(ctx.get_str("out"), "fallback ok");
         assert_eq!(client.recorded_calls().await.len(), 2);
     }
 
@@ -1491,7 +1491,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctx.get_str("good_out"), "good ");
+        assert_eq!(ctx.get_str("good_out"), "good");
         assert_eq!(ctx.get_str("__last_error_step"), "bad");
         assert_eq!(ctx.get("__error_count").and_then(|v| v.as_u64()), Some(1));
     }
