@@ -1,20 +1,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::error::TermiError;
-use crate::explore::prompts::{
-    build_filter_prompt, build_summary_prompt, format_file_contents, format_file_list,
-};
+use crate::explore::prompts::{format_file_contents, format_file_list};
 use crate::explore::walker::{walk_directory, FileEntry};
 use crate::ollama::OllamaClient;
 use crate::workflow::context::WorkflowContext;
 use crate::workflow::events::StepEvent;
-use crate::workflow::runner::Workflow;
-use crate::workflow::step::StepBuilder;
+use crate::workflow::presets;
 
 pub struct ExploreConfig {
     pub model: String,
@@ -62,25 +58,14 @@ impl ExplorePipeline {
         let file_list_str = format_file_list(&entries);
 
         // ── Step 2: LLM identifies interesting files ──────────────────────────
-        let filter_schema = json!({"type": "array", "items": {"type": "string"}});
-        let model = self.config.model.clone();
-
-        let mut filter_builder = Workflow::builder().step(
-            StepBuilder::new("filter_files")
-                .model(&model)
-                .prompt(|ctx| build_filter_prompt(ctx.get_str("file_list")))
-                .output_json_schema(filter_schema)
-                .store_as("interesting_files"),
-        );
-        if let Some(tx) = self.events.clone() {
-            filter_builder = filter_builder.with_events(tx);
-        }
-        let filter_workflow = filter_builder.build();
-
         let mut ctx = WorkflowContext::new();
         ctx.set("file_list", &file_list_str);
 
-        let ctx = filter_workflow.run(Arc::clone(&self.client), ctx).await?;
+        let mut filter_b = presets::filter_files(&self.config.model);
+        if let Some(tx) = &self.events {
+            filter_b = filter_b.with_events(tx.clone());
+        }
+        let ctx = filter_b.build().run(Arc::clone(&self.client), ctx).await?;
 
         let interesting_paths: Vec<String> = ctx
             .get_array("interesting_files")
@@ -142,22 +127,14 @@ impl ExplorePipeline {
         // ── Step 4: LLM summarizes the project ────────────────────────────────
         let contents_block = format_file_contents(&file_contents);
 
-        let mut summary_builder = Workflow::builder().step(
-            StepBuilder::new("summarize")
-                .model(&model)
-                .prompt(|ctx| build_summary_prompt(ctx.get_str("file_contents")))
-                .output_text()
-                .store_as("summary"),
-        );
-        if let Some(tx) = self.events.clone() {
-            summary_builder = summary_builder.with_events(tx);
-        }
-        let summary_workflow = summary_builder.build();
-
         let mut ctx2 = WorkflowContext::new();
         ctx2.set("file_contents", &contents_block);
 
-        let ctx2 = summary_workflow.run(Arc::clone(&self.client), ctx2).await?;
+        let mut summary_b = presets::summarize_content(&self.config.model);
+        if let Some(tx) = &self.events {
+            summary_b = summary_b.with_events(tx.clone());
+        }
+        let ctx2 = summary_b.build().run(Arc::clone(&self.client), ctx2).await?;
 
         if let Some(tx) = &self.events {
             let _ = tx.send(StepEvent::WorkflowComplete).await;
@@ -222,7 +199,7 @@ mod tests {
 
         let result = pipeline.run(dir.path()).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TermiError::Pipeline(_)));
+        assert!(matches!(result.unwrap_err(), TermiError::StepFailed { .. }));
     }
 
     #[tokio::test]
